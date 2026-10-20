@@ -48,12 +48,14 @@ func TestGrantBucketAccess(t *testing.T) {
 
 	adminClient := admin.ClientMock{}
 	s3client := s3.ClientMock{}
+	bucketActions := []string{"s3:ListBucket"}
+	objectActions := []string{"s3:GetObject", "s3:GetObjectVersion", "s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectVersion"}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			accessKey, secretKey, err := GrantBucketAccess(context.TODO(), adminClient, s3client, tc.name, "mockGroup", tc.name)
+			accessKey, secretKey, err := GrantBucketAccess(context.TODO(), adminClient, s3client, tc.name, "mockGroup", tc.name, bucketActions, objectActions)
 
 			if tc.expectedError {
 				require.ErrorContains(t, err, tc.name)

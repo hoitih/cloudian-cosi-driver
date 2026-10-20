@@ -21,7 +21,11 @@ type ClientMock struct {
 type BucketAccessGrantorMock struct{}
 
 func (BucketAccessGrantorMock) CreateUser(_ context.Context, params *iam.CreateUserInput, _ ...func(*iam.Options)) (*iam.CreateUserOutput, error) {
-	if *params.UserName == "grant_bucket_access_create_user_fail" {
+	if strings.HasSuffix(*params.UserName, "grant_bucket_access_existing_user") {
+		return nil, &types.EntityAlreadyExistsException{}
+	}
+
+	if strings.HasSuffix(*params.UserName, "grant_bucket_access_create_user_fail") {
 		return nil, errors.New("grant_bucket_access_create_user_fail")
 	}
 
@@ -29,7 +33,7 @@ func (BucketAccessGrantorMock) CreateUser(_ context.Context, params *iam.CreateU
 }
 
 func (BucketAccessGrantorMock) PutUserPolicy(_ context.Context, params *iam.PutUserPolicyInput, _ ...func(*iam.Options)) (*iam.PutUserPolicyOutput, error) {
-	if *params.UserName == "grant_bucket_access_create_policy_fail" {
+	if strings.HasSuffix(*params.UserName, "grant_bucket_access_create_policy_fail") {
 		return nil, errors.New("grant_bucket_access_create_policy_fail")
 	}
 
@@ -56,7 +60,7 @@ func (BucketAccessGrantorMock) CreateAccessKey(_ context.Context, params *iam.Cr
 type BucketAccessRevokerMock struct{}
 
 func (BucketAccessRevokerMock) ListUserPolicies(_ context.Context, params *iam.ListUserPoliciesInput, _ ...func(*iam.Options)) (*iam.ListUserPoliciesOutput, error) {
-	if *params.UserName == "revoke_bucket_access_list_policies_fail" {
+	if strings.HasSuffix(*params.UserName, "revoke_bucket_access_list_policies_fail") {
 		return nil, errors.New("revoke_bucket_access_list_policies_fail")
 	}
 

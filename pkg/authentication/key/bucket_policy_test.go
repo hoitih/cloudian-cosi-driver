@@ -11,6 +11,9 @@ import (
 func TestRemovePolicyStatementsForUser(t *testing.T) {
 	t.Parallel()
 
+	bucketActions := []string{"s3:ListBucket"}
+	objectActions := []string{"s3:GetObject", "s3:GetObjectVersion", "s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectVersion"}
+
 	testCases := []struct {
 		name           string
 		expectedOutput map[string]interface{}
@@ -54,7 +57,10 @@ func TestRemovePolicyStatementsForUser(t *testing.T) {
 
 			var policyJSON map[string]interface{}
 
-			err := json.Unmarshal([]byte(defaultPolicy(tc.name, "bucket")), &policyJSON)
+			policy, err := defaultPolicy(tc.name, "bucket", bucketActions, objectActions)
+			require.NoError(t, err)
+
+			err = json.Unmarshal([]byte(policy), &policyJSON)
 			require.NoError(t, err)
 
 			err = removePolicyStatementsForUser(policyJSON, "statement_removed")
@@ -66,6 +72,9 @@ func TestRemovePolicyStatementsForUser(t *testing.T) {
 
 func TestAddStatementToPolicy(t *testing.T) {
 	t.Parallel()
+
+	bucketActions := []string{"s3:ListBucket"}
+	objectActions := []string{"s3:GetObject", "s3:GetObjectVersion", "s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectVersion"}
 
 	policyJSON := map[string]interface{}{
 		"Statement": []interface{}{},
@@ -94,9 +103,10 @@ func TestAddStatementToPolicy(t *testing.T) {
 		"Version": "2012-10-17",
 	}
 
-	policyStatement := defaultPolicyStatement("user", "bucket")
+	policyStatement, err := defaultPolicyStatement("user", "bucket", bucketActions, objectActions)
+	require.NoError(t, err)
 
-	err := addStatementToPolicy(policyJSON, policyStatement)
+	err = addStatementToPolicy(policyJSON, policyStatement)
 	require.NoError(t, err)
 	require.Equal(t, expectedOutput, policyJSON)
 }

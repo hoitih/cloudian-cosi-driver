@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 
 	"github.com/cloudian/cloudian-cosi-driver/pkg/clients/admin"
 	"github.com/cloudian/cloudian-cosi-driver/pkg/clients/iam"
@@ -13,7 +14,7 @@ import (
 	"github.com/cloudian/cloudian-cosi-driver/pkg/provisioner"
 	"google.golang.org/grpc"
 	klog "k8s.io/klog/v2"
-	spec "sigs.k8s.io/container-object-storage-interface-spec"
+	spec "sigs.k8s.io/container-object-storage-interface/proto"
 )
 
 func Start(cosiConfig config.Config) error {
@@ -94,9 +95,12 @@ func loggingInterceptor() grpc.UnaryServerInterceptor {
 		klog.InfoS("GRPC call", "method", info.FullMethod, "request", req)
 
 		resp, err := handler(ctx, req)
-		if err != nil {
+		switch {
+		case err != nil:
 			klog.Errorf("GRPC error %v", err)
-		} else {
+		case strings.HasSuffix(info.FullMethod, "/DriverGrantBucketAccess"):
+			klog.InfoS("GRPC response", "method", info.FullMethod)
+		default:
 			klog.InfoS("GRPC response", "method", info.FullMethod, "response", resp)
 		}
 

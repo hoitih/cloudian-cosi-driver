@@ -22,7 +22,7 @@ type ClientMock struct {
 type UserCreatorMock struct{}
 
 func (UserCreatorMock) PutUser(_ context.Context, body api.PutUserJSONRequestBody, _ ...api.RequestEditorFn) (*http.Response, error) {
-	if body.UserId == "grant_bucket_access_create_user_fail" {
+	if strings.HasSuffix(body.UserId, "grant_bucket_access_create_user_fail") {
 		return nil, errors.New("grant_bucket_access_create_user_fail")
 	}
 
@@ -37,7 +37,7 @@ func (UserCreatorMock) PutUser(_ context.Context, body api.PutUserJSONRequestBod
 }
 
 func (UserCreatorMock) PutUserCredentialsWithResponse(_ context.Context, params *api.PutUserCredentialsParams, _ ...api.RequestEditorFn) (*api.PutUserCredentialsResponse, error) {
-	if params.UserId == "grant_bucket_access_create_credentials_fail" {
+	if strings.HasSuffix(params.UserId, "grant_bucket_access_create_credentials_fail") {
 		return nil, errors.New("grant_bucket_access_create_credentials_fail")
 	}
 
@@ -62,7 +62,7 @@ func (UserCreatorMock) PutUserCredentialsWithResponse(_ context.Context, params 
 type UserDeletorMock struct{}
 
 func (UserDeletorMock) GetUser(_ context.Context, params *api.GetUserParams, _ ...api.RequestEditorFn) (*http.Response, error) {
-	if params.UserId == "revoke_bucket_access_get_user_fail" {
+	if strings.HasSuffix(params.UserId, "revoke_bucket_access_get_user_fail") {
 		return nil, errors.New("revoke_bucket_access_get_user_fail")
 	}
 
@@ -77,7 +77,7 @@ func (UserDeletorMock) GetUser(_ context.Context, params *api.GetUserParams, _ .
 }
 
 func (UserDeletorMock) DeleteUser(_ context.Context, params *api.DeleteUserParams, _ ...api.RequestEditorFn) (*http.Response, error) {
-	if params.UserId == "revoke_bucket_access_delete_user_fail" {
+	if strings.HasSuffix(params.UserId, "revoke_bucket_access_delete_user_fail") {
 		return nil, errors.New("revoke_bucket_access_delete_user_fail")
 	}
 

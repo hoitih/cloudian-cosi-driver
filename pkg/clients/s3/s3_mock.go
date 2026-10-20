@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 // Mock client
@@ -27,6 +28,14 @@ func (BucketCreatorMock) CreateBucket(_ context.Context, params *s3.CreateBucket
 		return nil, errors.New("create_bucket_fail")
 	}
 
+	if *params.Bucket == "create_bucket_existing_owned" {
+		return nil, &types.BucketAlreadyOwnedByYou{}
+	}
+
+	if *params.Bucket == "create_bucket_exists_other_owner" {
+		return nil, &types.BucketAlreadyExists{}
+	}
+
 	return &s3.CreateBucketOutput{Location: &location}, nil
 }
 
@@ -39,7 +48,23 @@ func (BucketDeletorMock) DeleteBucket(_ context.Context, params *s3.DeleteBucket
 		return nil, errors.New("delete_bucket_fail")
 	}
 
+	if *params.Bucket == "delete_bucket_missing" {
+		return nil, &types.NoSuchBucket{}
+	}
+
 	return &s3.DeleteBucketOutput{}, nil
+}
+
+func (BucketCreatorMock) HeadBucket(_ context.Context, params *s3.HeadBucketInput, _ ...func(*s3.Options)) (*s3.HeadBucketOutput, error) {
+	if *params.Bucket == "get_bucket_not_found" {
+		return nil, &types.NotFound{}
+	}
+
+	if *params.Bucket == "get_bucket_fail" {
+		return nil, errors.New("get_bucket_fail")
+	}
+
+	return &s3.HeadBucketOutput{}, nil
 }
 
 // Policy modify

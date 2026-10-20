@@ -10,32 +10,37 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-func defaultPolicy(canonicalUserID, bucket string) string {
+func defaultPolicy(canonicalUserID, bucket string, bucketActions, objectActions []string) (string, error) {
+	statement, err := defaultPolicyStatement(canonicalUserID, bucket, bucketActions, objectActions)
+	if err != nil {
+		return "", err
+	}
+
 	return `{
 		"Version": "2012-10-17",
-		"Statement": [` + defaultPolicyStatement(canonicalUserID, bucket) + `]
-	}`
+		"Statement": [` + statement + `]
+	}`, nil
 }
 
-func defaultPolicyStatement(canonicalUserID, bucket string) string {
+func defaultPolicyStatement(canonicalUserID, bucket string, bucketActions, objectActions []string) (string, error) {
+	actions := append(append([]string(nil), objectActions...), bucketActions...)
+
+	actionJSON, err := json.Marshal(actions)
+	if err != nil {
+		return "", fmt.Errorf("failed to serialize S3 actions: %w", err)
+	}
+
 	return fmt.Sprintf(`{
 		"Effect": "Allow",
 		"Principal": {
         	"CanonicalUser": "%s"
       	},
-		"Action": [
-			"s3:GetObject",
-			"s3:GetObjectVersion",
-			"s3:PutObject",
-			"s3:DeleteObject",
-			"s3:DeleteObjectVersion",
-			"s3:ListBucket"
-		],
+		"Action": %s,
 		"Resource": [
 			"arn:aws:s3:::%s",
 			"arn:aws:s3:::%s/*"
 		]
-	}`, canonicalUserID, bucket, bucket)
+	}`, canonicalUserID, actionJSON, bucket, bucket), nil
 }
 
 func updateBucketPolicy(ctx context.Context, client PolicyCreator, policy *s3.GetBucketPolicyOutput, statement, canonicalUser, bucket string) error {

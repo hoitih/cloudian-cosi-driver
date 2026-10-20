@@ -22,7 +22,13 @@ type PolicyCreator interface {
 }
 
 // Grant bucket access using keys
-func GrantBucketAccess(ctx context.Context, adminClient UserCreator, s3Client PolicyCreator, user, group, bucket string) (accessKey, secretKey string, err error) {
+func GrantBucketAccess(
+	ctx context.Context,
+	adminClient UserCreator,
+	s3Client PolicyCreator,
+	user, group, bucket string,
+	bucketActions, objectActions []string,
+) (accessKey, secretKey string, err error) {
 	klog.Infof("Creating S3 user %s, group %s", user, group)
 
 	canonicalUserID, err := CreateUser(ctx, adminClient, user, group)
@@ -39,7 +45,7 @@ func GrantBucketAccess(ctx context.Context, adminClient UserCreator, s3Client Po
 
 	klog.Infof("Creating policy for bucket %s to allow user %s access", bucket, user)
 
-	if err := CreatePolicy(ctx, s3Client, canonicalUserID, bucket); err != nil {
+	if err := CreatePolicy(ctx, s3Client, canonicalUserID, bucket, bucketActions, objectActions); err != nil {
 		return "", "", fmt.Errorf("failed to create policy: %w", err)
 	}
 
@@ -96,9 +102,16 @@ func CreateCredentials(ctx context.Context, client UserCreator, user, group stri
 	return response.JSON200.AccessKey, response.JSON200.SecretKey, nil
 }
 
-func CreatePolicy(ctx context.Context, client PolicyCreator, canonicalUser, bucket string) error {
-	policyStatement := defaultPolicyStatement(canonicalUser, bucket)
-	policy := defaultPolicy(canonicalUser, bucket)
+func CreatePolicy(ctx context.Context, client PolicyCreator, canonicalUser, bucket string, bucketActions, objectActions []string) error {
+	policyStatement, err := defaultPolicyStatement(canonicalUser, bucket, bucketActions, objectActions)
+	if err != nil {
+		return fmt.Errorf("failed to serialize bucket policy statement: %w", err)
+	}
+
+	policy, err := defaultPolicy(canonicalUser, bucket, bucketActions, objectActions)
+	if err != nil {
+		return fmt.Errorf("failed to serialize bucket policy: %w", err)
+	}
 
 	getParams := &s3.GetBucketPolicyInput{
 		Bucket: &bucket,
