@@ -2,8 +2,14 @@ package provisioner
 
 import (
 	"context"
+	"encoding/xml"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/cloudian/cloudian-cosi-driver/pkg/clients/admin"
 	"github.com/cloudian/cloudian-cosi-driver/pkg/clients/iam"
 	"github.com/cloudian/cloudian-cosi-driver/pkg/clients/s3"
@@ -94,6 +100,122 @@ func TestDriverGenerateBucketId(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, tc.request.GetName(), response.GetBucketId())
 		})
+	}
+}
+
+func TestDriverCreateBucketRejectsInvalidConfiguration(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name       string
+		parameters map[string]string
+	}{
+		{name: "versioning", parameters: map[string]string{"versioning": "invalid"}},
+		{name: "retention without lock", parameters: map[string]string{"retentionMode": "GOVERNANCE", "retentionDays": "30"}},
+		{name: "suspended locked bucket", parameters: map[string]string{"objectLockEnabled": "true", "versioning": "Suspended"}},
+		{name: "lifecycle", parameters: map[string]string{"lifecyclePolicy": "not JSON"}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := Server{}
+			response, err := server.DriverCreateBucket(context.Background(), &spec.DriverCreateBucketRequest{
+				BucketId: "bucket", Parameters: tc.parameters,
+			})
+			require.Equal(t, codes.InvalidArgument, status.Code(err))
+			require.Nil(t, response)
+		})
+	}
+}
+
+func TestDriverCreateBucketConfigurationOverHTTP(t *testing.T) {
+	t.Parallel()
+
+	type bucketPayload struct {
+		Status            string `xml:"Status"`
+		ObjectLockEnabled string `xml:"ObjectLockEnabled"`
+		RetentionMode     string `xml:"Rule>DefaultRetention>Mode"`
+		RetentionDays     int    `xml:"Rule>DefaultRetention>Days"`
+		ExpirationDays    int    `xml:"Rule>Expiration>Days"`
+		NoncurrentDays    int    `xml:"Rule>NoncurrentVersionExpiration>NoncurrentDays"`
+	}
+
+	type capturedRequest struct {
+		method        string
+		path          string
+		query         string
+		storagePolicy string
+		objectLock    string
+		body          []byte
+	}
+
+	requests := make(chan capturedRequest, 4)
+	backend := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Errorf("read S3 request body: %v", err)
+			writer.WriteHeader(http.StatusBadRequest)
+
+			return
+		}
+
+		requests <- capturedRequest{
+			method: request.Method, path: request.URL.Path, query: request.URL.RawQuery,
+			storagePolicy: request.Header.Get("X-Gmt-Policyid"),
+			objectLock:    request.Header.Get("X-Amz-Bucket-Object-Lock-Enabled"), body: body,
+		}
+
+		writer.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(backend.Close)
+
+	client := awss3.NewFromConfig(aws.Config{
+		Region: "test-region", Credentials: aws.AnonymousCredentials{},
+	}, func(options *awss3.Options) {
+		options.BaseEndpoint = aws.String(backend.URL)
+		options.UsePathStyle = true
+		options.RetryMaxAttempts = 1
+	})
+	server := Server{S3Client: client}
+	response, err := server.DriverCreateBucket(context.Background(), &spec.DriverCreateBucketRequest{
+		BucketId: "configured-bucket",
+		Parameters: map[string]string{
+			"storagePolicyID": "policy-1", "objectLockEnabled": "true",
+			"retentionMode": "COMPLIANCE", "retentionDays": "30",
+			"lifecyclePolicy": `{"Rules":[{"Status":"Enabled","Filter":{"Prefix":""},
+				"Expiration":{"Days":30},"NoncurrentVersionExpiration":{"NoncurrentDays":1}}]}`,
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, response)
+	require.Len(t, requests, 4)
+
+	create := <-requests
+	require.Equal(t, "policy-1", create.storagePolicy)
+	require.Equal(t, "true", create.objectLock)
+
+	for _, operation := range []string{"versioning", "object-lock", "lifecycle"} {
+		request := <-requests
+		require.Equal(t, http.MethodPut, request.method)
+		require.Equal(t, "/configured-bucket", request.path)
+		require.Contains(t, request.query, operation)
+
+		var payload bucketPayload
+		require.NoError(t, xml.Unmarshal(request.body, &payload))
+
+		switch operation {
+		case "versioning":
+			require.Equal(t, "Enabled", payload.Status)
+		case "object-lock":
+			require.Equal(t, "Enabled", payload.ObjectLockEnabled)
+			require.Equal(t, "COMPLIANCE", payload.RetentionMode)
+			require.Equal(t, 30, payload.RetentionDays)
+		case "lifecycle":
+			require.Equal(t, 30, payload.ExpirationDays)
+			require.Equal(t, 1, payload.NoncurrentDays)
+		}
 	}
 }
 

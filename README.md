@@ -6,6 +6,8 @@ This repository contains the Cloudian [Container Object Storage Interface (COSI)
 
 To deploy the pre-built containers, see [Quick Start](docs/quick-start.md).
 
+Bucket creation supports HyperStore storage policy selection, S3 versioning, Object Lock with default retention, and lifecycle rules for current and noncurrent versions. Configure these through `BucketClass.spec.parameters` and select the class from a BucketClaim. See [Bucket Configuration Parameters](docs/quick-start.md#bucket-configuration-parameters) for parameter names, examples, permissions, and retention/deletion caveats.
+
 ## COSI v1alpha2 compatibility
 
 This driver targets COSI `v1alpha2` only. It does not register the `v1alpha1` gRPC services, so the COSI API/controller and this driver must be upgraded together. The Quick Start pins the COSI manifests to the upstream commit used by the driver's protobuf dependency; keep those versions aligned because `v1alpha2` is still pre-release.

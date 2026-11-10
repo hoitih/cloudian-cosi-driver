@@ -66,12 +66,14 @@ func (s *Server) DriverCreateBucket(ctx context.Context, request *spec.DriverCre
 		return nil, grpcError(codes.InvalidArgument, "bucket ID is required")
 	}
 
-	params := request.GetParameters()
-	storagePolicyID := params["storagePolicyID"]
+	configuration, err := bucket.ParseConfiguration(request.GetParameters())
+	if err != nil {
+		return nil, grpcErrorf(codes.InvalidArgument, "invalid bucket parameters: %s", err)
+	}
 
 	klog.Infof("Creating bucket %s", bucketID)
 
-	if err := bucket.CreateBucket(ctx, s.S3Client, bucketID, storagePolicyID); err != nil {
+	if err := bucket.CreateBucket(ctx, s.S3Client, bucketID, configuration); err != nil {
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "BucketAlreadyExists" {
 			return nil, grpcErrorf(codes.AlreadyExists, "bucket %s already exists", bucketID)

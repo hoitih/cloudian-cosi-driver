@@ -21,6 +21,18 @@ type ClientMock struct {
 
 type BucketCreatorMock struct{}
 
+func (BucketCreatorMock) PutBucketVersioning(_ context.Context, _ *s3.PutBucketVersioningInput, _ ...func(*s3.Options)) (*s3.PutBucketVersioningOutput, error) {
+	return &s3.PutBucketVersioningOutput{}, nil
+}
+
+func (BucketCreatorMock) PutObjectLockConfiguration(_ context.Context, _ *s3.PutObjectLockConfigurationInput, _ ...func(*s3.Options)) (*s3.PutObjectLockConfigurationOutput, error) {
+	return &s3.PutObjectLockConfigurationOutput{}, nil
+}
+
+func (BucketCreatorMock) PutBucketLifecycleConfiguration(_ context.Context, _ *s3.PutBucketLifecycleConfigurationInput, _ ...func(*s3.Options)) (*s3.PutBucketLifecycleConfigurationOutput, error) {
+	return &s3.PutBucketLifecycleConfigurationOutput{}, nil
+}
+
 func (BucketCreatorMock) CreateBucket(_ context.Context, params *s3.CreateBucketInput, _ ...func(*s3.Options)) (*s3.CreateBucketOutput, error) {
 	location := "/" + *params.Bucket
 
