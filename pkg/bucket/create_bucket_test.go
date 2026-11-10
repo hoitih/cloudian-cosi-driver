@@ -8,6 +8,7 @@ import (
 
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/cloudian/cloudian-cosi-driver/pkg/clients/s3"
 	"github.com/stretchr/testify/require"
 )
@@ -50,6 +51,7 @@ type configurationClient struct {
 	s3.ClientMock
 	calls      []string
 	failAt     string
+	failure    error
 	create     *awss3.CreateBucketInput
 	versioning *awss3.PutBucketVersioningInput
 	lock       *awss3.PutObjectLockConfigurationInput
@@ -59,6 +61,10 @@ type configurationClient struct {
 func (client *configurationClient) record(operation string) error {
 	client.calls = append(client.calls, operation)
 	if client.failAt == operation {
+		if client.failure != nil {
+			return client.failure
+		}
+
 		return errors.New("backend rejected configuration")
 	}
 
@@ -220,5 +226,45 @@ func TestCreateBucketConfigurationFailureAndRetry(t *testing.T) {
 			require.NoError(t, CreateBucket(context.Background(), client, "create_bucket_existing_owned", configuration))
 			require.Equal(t, []string{"create", "versioning", "lock", "lifecycle"}, client.calls)
 		})
+	}
+}
+
+func TestCreateBucketVersioningBackendFailureAndRetry(t *testing.T) {
+	t.Parallel()
+
+	for _, versioning := range []string{"Enabled", "Suspended"} {
+		for _, code := range []string{"NotImplemented", "InvalidRequest", "AccessDenied"} {
+			t.Run(versioning+"/"+code, func(t *testing.T) {
+				t.Parallel()
+
+				configuration, err := ParseConfiguration(map[string]string{
+					"versioning":      versioning,
+					"lifecyclePolicy": `{"Rules":[{"Status":"Enabled","Filter":{"Prefix":""},"Expiration":{"Days":30}}]}`,
+				})
+				require.NoError(t, err)
+
+				backendError := &smithy.GenericAPIError{Code: code, Message: "versioning request rejected"}
+				client := &configurationClient{failAt: "versioning", failure: backendError}
+				err = CreateBucket(context.Background(), client, "new-bucket", configuration)
+				require.ErrorIs(t, err, backendError)
+				require.ErrorContains(t, err, "failed to set versioning")
+				require.Equal(t, []string{"create", "versioning"}, client.calls)
+				require.Nil(t, client.lock)
+				require.Nil(t, client.lifecycle)
+
+				var apiError smithy.APIError
+				require.ErrorAs(t, err, &apiError)
+				require.Equal(t, code, apiError.ErrorCode())
+
+				client.failAt = ""
+				client.calls = nil
+				err = CreateBucket(context.Background(), client, "create_bucket_existing_owned", configuration)
+				require.NoError(t, err)
+				require.Equal(t, []string{"create", "versioning", "lifecycle"}, client.calls)
+				require.Equal(t, "create_bucket_existing_owned", *client.versioning.Bucket)
+				require.Equal(t, types.BucketVersioningStatus(versioning), client.versioning.VersioningConfiguration.Status)
+				require.Nil(t, client.create.ObjectLockEnabledForBucket)
+			})
+		}
 	}
 }

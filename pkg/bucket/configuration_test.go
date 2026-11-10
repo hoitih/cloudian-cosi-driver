@@ -49,6 +49,61 @@ func TestParseConfigurationDefaults(t *testing.T) {
 	require.Equal(t, types.ObjectLockRetentionModeGovernance, configuration.Retention.Mode)
 }
 
+func TestParseConfigurationVersioning(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name       string
+		parameters map[string]string
+		wantStatus types.BucketVersioningStatus
+		wantLock   bool
+		wantError  string
+	}{
+		{name: "omitted"},
+		{name: "enabled", parameters: map[string]string{"versioning": "Enabled"}, wantStatus: types.BucketVersioningStatusEnabled},
+		{name: "suspended", parameters: map[string]string{"versioning": "Suspended"}, wantStatus: types.BucketVersioningStatusSuspended},
+		{
+			name: "object lock implies enabled", parameters: map[string]string{"objectLockEnabled": "true"},
+			wantStatus: types.BucketVersioningStatusEnabled, wantLock: true,
+		},
+		{
+			name: "object lock with explicit enabled", parameters: map[string]string{"objectLockEnabled": "true", "versioning": "Enabled"},
+			wantStatus: types.BucketVersioningStatusEnabled, wantLock: true,
+		},
+		{
+			name: "no object lock with suspended", parameters: map[string]string{"objectLockEnabled": "false", "versioning": "Suspended"},
+			wantStatus: types.BucketVersioningStatusSuspended,
+		},
+		{
+			name: "object lock rejects suspended", parameters: map[string]string{"objectLockEnabled": "true", "versioning": "Suspended"},
+			wantError: "object lock requires enabled versioning",
+		},
+		{name: "empty", parameters: map[string]string{"versioning": ""}, wantError: "versioning must be Enabled or Suspended"},
+		{name: "lowercase enabled", parameters: map[string]string{"versioning": "enabled"}, wantError: "versioning must be Enabled or Suspended"},
+		{name: "lowercase suspended", parameters: map[string]string{"versioning": "suspended"}, wantError: "versioning must be Enabled or Suspended"},
+		{name: "disabled is not suspended", parameters: map[string]string{"versioning": "Disabled"}, wantError: "versioning must be Enabled or Suspended"},
+		{name: "boolean is not a status", parameters: map[string]string{"versioning": "true"}, wantError: "versioning must be Enabled or Suspended"},
+		{name: "whitespace", parameters: map[string]string{"versioning": " Enabled "}, wantError: "versioning must be Enabled or Suspended"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			configuration, err := ParseConfiguration(tc.parameters)
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, tc.wantStatus, configuration.Versioning)
+			require.Equal(t, tc.wantLock, configuration.ObjectLock)
+		})
+	}
+}
+
 func TestParseConfigurationRejectsInvalidInput(t *testing.T) {
 	t.Parallel()
 

@@ -366,6 +366,79 @@ func TestDriverCreateBucketConfigurationOverHTTP(t *testing.T) {
 	}
 }
 
+func TestDriverCreateBucketVersioningOverHTTP(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name       string
+		parameters map[string]string
+		wantStatus string
+	}{
+		{name: "omitted"},
+		{name: "enabled", parameters: map[string]string{"versioning": "Enabled"}, wantStatus: "Enabled"},
+		{name: "suspended", parameters: map[string]string{"versioning": "Suspended"}, wantStatus: "Suspended"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			type capturedVersioning struct {
+				Status string `xml:"Status"`
+			}
+
+			requests := make(chan capturedVersioning, 4)
+			backend := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.Method != http.MethodPut || request.URL.Path != "/versioning-bucket" {
+					t.Errorf("unexpected S3 request: %s %s", request.Method, request.URL.Path)
+				}
+
+				if request.Header.Get("X-Amz-Bucket-Object-Lock-Enabled") != "" {
+					t.Error("versioning alone must not enable Object Lock")
+				}
+
+				var payload capturedVersioning
+				if request.URL.Query().Has("versioning") {
+					if err := xml.NewDecoder(request.Body).Decode(&payload); err != nil {
+						t.Errorf("decode versioning request: %v", err)
+					}
+				}
+
+				requests <- payload
+
+				writer.WriteHeader(http.StatusOK)
+			}))
+			t.Cleanup(backend.Close)
+
+			client := awss3.NewFromConfig(aws.Config{
+				Region: "test-region", Credentials: aws.AnonymousCredentials{},
+			}, func(options *awss3.Options) {
+				options.BaseEndpoint = aws.String(backend.URL)
+				options.UsePathStyle = true
+				options.RetryMaxAttempts = 1
+			})
+			server := Server{S3Client: client}
+			response, err := server.DriverCreateBucket(context.Background(), &spec.DriverCreateBucketRequest{
+				BucketId: "versioning-bucket", Parameters: tc.parameters,
+			})
+			require.NoError(t, err)
+			require.NotNil(t, response)
+
+			wantRequests := 1
+			if tc.wantStatus != "" {
+				wantRequests++
+			}
+
+			require.Len(t, requests, wantRequests)
+			require.Empty(t, (<-requests).Status, "the first request must create the bucket")
+
+			if tc.wantStatus != "" {
+				require.Equal(t, tc.wantStatus, (<-requests).Status)
+			}
+		})
+	}
+}
+
 func TestDriverGetBucket(t *testing.T) {
 	t.Parallel()
 
