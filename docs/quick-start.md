@@ -63,21 +63,61 @@ A `bucket` kubernetes resource object will then be created as well as an actual 
 
 ### Bucket Configuration Parameters
 
-Configure these options in `BucketClass.spec.parameters`. A BucketClaim selects the class through `spec.bucketClassName`; neither the v1alpha1 nor v1alpha2 BucketClaim schema has a free-form parameters field. The existing parameter is spelled `storagePolicyID` (not `storagePolicID`). All parameter values are strings.
+Configure these options in `BucketClass.spec.parameters`. A BucketClaim selects the class through `spec.bucketClassName`; neither the v1alpha1 nor v1alpha2 BucketClaim schema has a free-form parameters field. All parameter values are strings.
 
 | Parameter | Values | Behavior when omitted |
 | --- | --- | --- |
 | `storagePolicyID` | HyperStore storage policy ID | Existing default storage policy behavior. |
 | `versioning` | `Enabled` or `Suspended` | No versioning request, unless Object Lock is enabled. |
 | `objectLockEnabled` | `"true"` or `"false"` | No Object Lock request. |
-| `retentionMode` | `GOVERNANCE` or `COMPLIANCE` | No default retention rule. |
-| `retentionDays` | Positive integer | Specify exactly one of days or years together with a retention mode. |
-| `retentionYears` | Positive integer | Specify exactly one of days or years together with a retention mode. |
-| `lifecyclePolicy` | JSON object with S3 `Rules` | No lifecycle configuration request. |
+| `retentionMode` | `GOVERNANCE` or `COMPLIANCE`; requires Object Lock and exactly one duration | No default retention rule is supplied. |
+| `retentionDays` | Positive 32-bit integer; cannot be combined with `retentionYears` | No duration in days; use years if configuring retention. |
+| `retentionYears` | Positive 32-bit integer; cannot be combined with `retentionDays` | No duration in years; use days if configuring retention. |
+| `lifecyclePolicy` | JSON object with a nonempty S3 `Rules` array | No lifecycle configuration request. |
 
-Retention requires `objectLockEnabled: "true"`. Object Lock enables versioning automatically; combining it with `versioning: Suspended` is rejected. Setting `objectLockEnabled: "false"` does not disable Object Lock on an existing bucket. Use Object Lock only when intended: enabling it is not reversible, and retained versions in `COMPLIANCE` mode cannot be deleted or have their retention shortened before expiry. `GOVERNANCE` mode allows bypass only to appropriately authorized callers; the driver does not use a retention bypass.
+Parameter values are case-sensitive. For example, use `versioning: "Enabled"`, not `versioning: "enabled"`. HyperStore may impose stricter limits on retention durations than the driver's positive 32-bit integer validation.
 
-For example, this class protects new object versions for 30 days and configures lifecycle cleanup:
+#### Retention And Object Lock
+
+Retention protects an object version from permanent deletion; it does not schedule deletion when the retention period ends. Lifecycle rules perform the cleanup separately.
+
+Retention requires `objectLockEnabled: "true"`. Object Lock enables versioning automatically; combining it with `versioning: "Suspended"` is rejected. Setting `objectLockEnabled: "false"` does not disable Object Lock on an existing bucket. Enabling Object Lock is not reversible.
+
+- `COMPLIANCE`: retained versions cannot be permanently deleted, or have their retention shortened, before expiry, even by privileged callers.
+- `GOVERNANCE`: appropriately authorized callers can bypass retention. The driver does not request a retention bypass.
+- Default retention applies to new object versions, not retroactively to existing objects. Each new version receives its own retention period. Object Lock without a default retention rule does not itself protect every new object; callers must supply object-level retention or a legal hold.
+- Retention protects versions, not object names: a new upload can create another version, and a delete request without a version ID can create a delete marker. Neither permanently removes the protected version.
+
+For retention measured in years, replace the days-based retention settings in the example below with:
+
+```yaml
+  retentionMode: "COMPLIANCE"
+  retentionYears: "1"
+```
+
+Do not also specify `retentionDays`. Omitting the mode, supplying both duration fields, or using a zero, negative, or non-numeric duration is invalid.
+
+#### Lifecycle Cleanup
+
+`lifecyclePolicy` contains the complete S3 lifecycle configuration as JSON inside a YAML string. Each rule needs a `Status` of `Enabled` or `Disabled`, a `Filter`, and at least one action. `Filter: {"Prefix": ""}` selects all object keys; use a nonempty prefix to limit a rule to particular keys. The legacy top-level rule `Prefix` field is not a substitute for `Filter` in this driver.
+
+For versioned buckets, configure each cleanup stage explicitly:
+
+| Lifecycle action | Purpose | Age measured from |
+| --- | --- | --- |
+| `Expiration.Days` | Expires the current version, normally creating a delete marker rather than permanently removing data. | Creation of that object version. |
+| `NoncurrentVersionExpiration.NoncurrentDays` | Permanently removes eligible old versions. Active retention or a legal hold still blocks removal. | When the version became noncurrent, for example after an overwrite or expiration. |
+| `Expiration.ExpiredObjectDeleteMarker` | Removes an eligible delete marker after the other versions have been removed. | Backend eligibility, not a configurable age. |
+
+Use a separate rule for `ExpiredObjectDeleteMarker: true`; do not combine it with `Days` or `Date` in the same `Expiration` object. Lifecycle cleanup is asynchronous. Neither retention expiry nor a lifecycle age guarantees immediate deletion.
+
+Lifecycle rules can also be used without Object Lock or retention. To keep versioning and cleanup from the example below without deletion protection, omit `objectLockEnabled`, `retentionMode`, and `retentionDays`, and keep `versioning` and `lifecyclePolicy`. For an unversioned bucket, current-object expiration permanently deletes eligible objects instead of creating delete markers.
+
+Supplying `lifecyclePolicy` replaces the bucket's lifecycle rule set; it does not append or merge rules. Include all rules that should remain configured. The backend must support any additional S3 actions you include, such as transitions or incomplete multipart upload cleanup.
+
+#### Protection And Cleanup Example
+
+This class protects new object versions for 30 days and configures lifecycle cleanup for all keys:
 
 ```yaml
 apiVersion: objectstorage.k8s.io/v1alpha2
@@ -126,11 +166,24 @@ spec:
     - S3
 ```
 
-Default retention applies to new object versions, not retroactively to existing objects. Object Lock without a default retention rule does not itself protect every new object; callers must supply object-level retention or a legal hold. Lifecycle expiration on a versioned bucket normally creates a delete marker rather than deleting the old data. `NoncurrentVersionExpiration` is needed to remove old versions, and its duration starts when a version becomes noncurrent, not when it was uploaded. Cleanup is asynchronous and is not guaranteed exactly 30 days after upload. Active retention or a legal hold continues to prevent permanent deletion.
+For a version that is never overwritten or manually deleted, this example works as follows:
 
-The lifecycle JSON uses S3 configuration field names, such as `Rules`, `Status`, `Filter`, `Expiration`, and `NoncurrentVersionExpiration`. Malformed JSON, unknown JSON fields, missing rule status/filter/action, and invalid retention/versioning combinations are rejected before creating the bucket. HyperStore validates the remaining S3-specific constraints and supported actions. Ensure your HyperStore version supports the requested APIs and the driver credentials allow `s3:PutBucketVersioning`, `s3:PutBucketObjectLockConfiguration`, and `s3:PutLifecycleConfiguration` as needed, in addition to bucket creation.
+1. Uploading the object creates a version with 30 days of retention.
+2. At the current-version expiration age of 30 days, lifecycle can create a delete marker. The data version becomes noncurrent.
+3. After at least one day as a noncurrent version, that data version becomes eligible for permanent cleanup, provided retention has expired and no legal hold applies.
+4. The delete-marker rule can remove the remaining expired marker once it is eligible.
 
-Configuration is applied during dynamic provisioning, not to statically imported buckets or as a continuous configuration controller. On a partial provisioning failure, the driver returns an error and reapplies the requested configuration on a COSI create retry; it does not delete the partially configured bucket. Omitted settings do not reset existing settings. BucketClass specs are immutable, so define a new class to provision new buckets with different settings.
+This is not a promise of deletion exactly 30 or 31 days after upload. Backend scheduling can delay each step. An overwrite can make a version noncurrent earlier, but permanent deletion remains blocked until its own retention period expires.
+
+#### Validation And Provisioning
+
+The lifecycle JSON uses S3 configuration field names, such as `Rules`, `Status`, `Filter`, `Expiration`, and `NoncurrentVersionExpiration`. Malformed JSON, unknown JSON fields, missing rule status/filter/action, and invalid retention/versioning combinations are rejected with COSI gRPC `InvalidArgument` before any S3 bucket creation call. The error message starts with `invalid bucket parameters:` and identifies the rejected setting. For example, combining Object Lock with suspended versioning returns `invalid bucket parameters: object lock requires enabled versioning`.
+
+HyperStore validates the remaining S3-specific constraints and supported actions. Ensure your HyperStore version supports the requested APIs and the driver credentials allow `s3:PutBucketVersioning`, `s3:PutBucketObjectLockConfiguration`, and `s3:PutLifecycleConfiguration` as needed, in addition to bucket creation. These are permissions for the driver's provisioning identity, not permissions automatically granted to application workloads.
+
+Configuration is applied during dynamic provisioning, not to statically imported buckets or as a continuous configuration controller. Object Lock is requested during bucket creation; the driver then applies versioning, Object Lock/default retention, and lifecycle configuration in that order. On a partial provisioning failure, the driver returns an error and reapplies the requested configuration on a COSI create retry; it does not delete the partially configured bucket.
+
+An omitted `versioning` or `lifecyclePolicy` does not send a request for that setting, except that Object Lock implies enabled versioning. With `objectLockEnabled: "true"`, the driver sends the requested Object Lock configuration, including a default retention rule only when specified; do not rely on an omitted retention rule to preserve an externally configured rule. BucketClass specs are immutable, so define a new class to provision new buckets with different settings.
 
 ## Delete a Bucket
 
