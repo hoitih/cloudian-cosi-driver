@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go"
 	"github.com/cloudian/cloudian-cosi-driver/pkg/clients/admin/api"
 	klog "k8s.io/klog/v2"
 )
@@ -26,11 +27,15 @@ type PolicyDeletor interface {
 
 // Revoke bucket access using keys
 func RevokeBucketAccess(ctx context.Context, adminClient UserDeletor, s3Client PolicyDeletor, user, group, bucket string) error {
-	klog.Infof("Deleting S3 user %s, group %s", user, group)
+	klog.Infof("Revoking S3 user %s, group %s", user, group)
 
-	canonicalUserID, err := DeleteUser(ctx, adminClient, user, group)
+	canonicalUserID, err := getUserCanonicalID(ctx, adminClient, user, group)
 	if err != nil {
-		return fmt.Errorf("failed to delete user: %w", err)
+		return fmt.Errorf("failed to get user: %w", err)
+	}
+
+	if canonicalUserID == "" {
+		return nil
 	}
 
 	klog.Infof("Deleting bucket policy for bucket %s", bucket)
@@ -39,15 +44,40 @@ func RevokeBucketAccess(ctx context.Context, adminClient UserDeletor, s3Client P
 		return fmt.Errorf("failed to delete policy: %w", err)
 	}
 
+	if err := removeUser(ctx, adminClient, user, group); err != nil {
+		return fmt.Errorf("failed to delete user: %w", err)
+	}
+
 	return nil
 }
 
 func DeleteUser(ctx context.Context, client UserDeletor, user, group string) (string, error) {
+	canonicalUserID, err := getUserCanonicalID(ctx, client, user, group)
+	if err != nil {
+		return "", err
+	}
+
+	if canonicalUserID == "" {
+		return "", nil
+	}
+
+	if err := removeUser(ctx, client, user, group); err != nil {
+		return "", err
+	}
+
+	return canonicalUserID, nil
+}
+
+func getUserCanonicalID(ctx context.Context, client UserDeletor, user, group string) (string, error) {
 	response, err := client.GetUser(ctx, &api.GetUserParams{UserId: user, GroupId: group})
 	if err != nil {
 		return "", fmt.Errorf("get user api call returned an error: %w", err)
 	}
 	defer response.Body.Close()
+
+	if response.StatusCode == http.StatusNotFound {
+		return "", nil
+	}
 
 	if response.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("unexpected status code: %d", response.StatusCode)
@@ -58,17 +88,25 @@ func DeleteUser(ctx context.Context, client UserDeletor, user, group string) (st
 		return "", fmt.Errorf("failed to get canonical user ID: %w", err)
 	}
 
-	response, err = client.DeleteUser(ctx, &api.DeleteUserParams{UserId: user, GroupId: group})
-	if err != nil {
-		return "", fmt.Errorf("delete user api call returned an error: %w", err)
-	}
-	defer response.Body.Close()
-
-	if response.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("unexpected status code: %d", response.StatusCode)
+	if canonicalUserID == "" {
+		return "", errors.New("user response has no canonical user ID")
 	}
 
 	return canonicalUserID, nil
+}
+
+func removeUser(ctx context.Context, client UserDeletor, user, group string) error {
+	response, err := client.DeleteUser(ctx, &api.DeleteUserParams{UserId: user, GroupId: group})
+	if err != nil {
+		return fmt.Errorf("delete user api call returned an error: %w", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("unexpected status code: %d", response.StatusCode)
+	}
+
+	return nil
 }
 
 func DeletePolicy(ctx context.Context, client PolicyDeletor, canonicalUser, bucket string) error {
@@ -78,11 +116,15 @@ func DeletePolicy(ctx context.Context, client PolicyDeletor, canonicalUser, buck
 
 	bucketPolicy, err := client.GetBucketPolicy(ctx, getParams)
 	if err != nil {
-		if strings.Contains(err.Error(), "NoSuchBucketPolicy") {
+		if isMissingPolicy(err) {
 			return nil
 		}
 
 		return fmt.Errorf("failed to get bucket policy: %w", err)
+	}
+
+	if bucketPolicy == nil || bucketPolicy.Policy == nil {
+		return errors.New("get bucket policy returned no policy document")
 	}
 
 	var policyJSON map[string]interface{}
@@ -103,32 +145,49 @@ func DeletePolicy(ctx context.Context, client PolicyDeletor, canonicalUser, buck
 	}
 
 	if len(statements) == 0 {
-		deleteParams := &s3.DeleteBucketPolicyInput{
-			Bucket: &bucket,
-		}
+		return deleteEmptyBucketPolicy(ctx, client, bucket)
+	}
 
-		if _, err := client.DeleteBucketPolicy(ctx, deleteParams); err != nil {
-			return fmt.Errorf("failed to delete bucket policy: %w", err)
-		}
-	} else {
-		updatedPolicy, err := json.Marshal(policyJSON)
-		if err != nil {
-			return fmt.Errorf("failed to marshal updated policy: %w", err)
-		}
+	return writeRemainingBucketPolicy(ctx, client, bucket, policyJSON)
+}
 
-		updatedPolicyStr := string(updatedPolicy)
-
-		putParams := &s3.PutBucketPolicyInput{
-			Bucket: &bucket,
-			Policy: &updatedPolicyStr,
-		}
-
-		klog.Infof("Bucket policy for bucket %s contains statements affecting other users, updating policy instead of deleting", bucket)
-
-		if _, err := client.PutBucketPolicy(ctx, putParams); err != nil {
-			return fmt.Errorf("failed to put bucket policy: %w", err)
-		}
+func deleteEmptyBucketPolicy(ctx context.Context, client PolicyDeletor, bucket string) error {
+	if _, err := client.DeleteBucketPolicy(ctx, &s3.DeleteBucketPolicyInput{Bucket: &bucket}); err != nil && !isMissingPolicy(err) {
+		return fmt.Errorf("failed to delete bucket policy: %w", err)
 	}
 
 	return nil
+}
+
+func writeRemainingBucketPolicy(ctx context.Context, client PolicyDeletor, bucket string, policy map[string]interface{}) error {
+	updatedPolicy, err := json.Marshal(policy)
+	if err != nil {
+		return fmt.Errorf("failed to marshal updated policy: %w", err)
+	}
+
+	updatedPolicyStr := string(updatedPolicy)
+	putParams := &s3.PutBucketPolicyInput{Bucket: &bucket, Policy: &updatedPolicyStr}
+
+	klog.Infof("Bucket policy for bucket %s contains statements affecting other users, updating policy instead of deleting", bucket)
+
+	if _, err := client.PutBucketPolicy(ctx, putParams); err != nil && !isMissingBucket(err) {
+		return fmt.Errorf("failed to put bucket policy: %w", err)
+	}
+
+	return nil
+}
+
+func isMissingPolicy(err error) bool {
+	var apiError smithy.APIError
+	if errors.As(err, &apiError) {
+		return apiError.ErrorCode() == "NoSuchBucketPolicy" || isMissingBucket(err)
+	}
+
+	return strings.TrimSpace(err.Error()) == "NoSuchBucketPolicy"
+}
+
+func isMissingBucket(err error) bool {
+	var apiError smithy.APIError
+
+	return errors.As(err, &apiError) && (apiError.ErrorCode() == "NoSuchBucket" || apiError.ErrorCode() == "NotFound")
 }

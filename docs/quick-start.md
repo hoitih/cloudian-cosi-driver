@@ -196,6 +196,12 @@ on the `deletionPolicy` set in the BucketClass.
 
 The driver does not empty buckets, purge object versions, or bypass Object Lock. With `deletionPolicy: Delete`, bucket deletion can fail while versions, delete markers, or protected data remain. `Retain` is recommended for retention-protected buckets until the data has expired and the bucket can be safely removed.
 
+### Deletion Retries And Finalizers
+
+COSI may repeat backend deletion requests after a restart, a partial failure, or a failed Kubernetes update. The driver treats an already-missing bucket as successfully deleted. IAM access revocation also tolerates already-missing users, inline policies, and access keys. HyperStore user-based revocation removes the user's bucket policy statement before deleting the user, so a failed policy update can be retried while the canonical user ID is still available. Missing users, bucket policies, or buckets do not block access revocation; permission errors and other backend failures remain errors.
+
+BucketClaim, BucketAccess, and BucketAccessClass reconciliation and Kubernetes finalizers belong to the separately deployed COSI controller/sidecar, not this driver's gRPC server. This repository does not implement finalizer updates. A finalizer update that conflicts with a concurrent resource change must be retried in that controller against a freshly fetched object, preserving other finalizers and treating an already-deleted object as success. Cleanup and dependency checks must still succeed before removing the controller's finalizer; do not force-remove finalizers to bypass retention, backend errors, or resources still in use.
+
 ## Grant Bucket Access
 
 ### Create a BucketAccessClass
