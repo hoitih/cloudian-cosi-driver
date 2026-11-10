@@ -3,10 +3,15 @@ package provisioner
 import (
 	"context"
 	"encoding/xml"
+	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
@@ -15,8 +20,11 @@ import (
 	"github.com/cloudian/cloudian-cosi-driver/pkg/clients/s3"
 	"github.com/cloudian/cloudian-cosi-driver/pkg/config"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/test/bufconn"
 	spec "sigs.k8s.io/container-object-storage-interface/proto"
 )
 
@@ -103,29 +111,168 @@ func TestDriverGenerateBucketId(t *testing.T) {
 	}
 }
 
+type bucketCreationRecorder struct {
+	S3Client
+	calls atomic.Int32
+}
+
+func (client *bucketCreationRecorder) CreateBucket(
+	_ context.Context, _ *awss3.CreateBucketInput, _ ...func(*awss3.Options),
+) (*awss3.CreateBucketOutput, error) {
+	client.calls.Add(1)
+
+	return nil, errors.New("unexpected backend bucket creation")
+}
+
 func TestDriverCreateBucketRejectsInvalidConfiguration(t *testing.T) {
 	t.Parallel()
+
+	const (
+		bufferSize = 1024 * 1024
+		rpcTimeout = 5 * time.Second
+	)
+
+	backend := &bucketCreationRecorder{}
+	listener := bufconn.Listen(bufferSize)
+	grpcServer := grpc.NewServer()
+	spec.RegisterProvisionerServer(grpcServer, &Server{S3Client: backend})
+	t.Cleanup(grpcServer.Stop)
+
+	go func() {
+		if err := grpcServer.Serve(listener); err != nil {
+			t.Errorf("serve COSI gRPC: %v", err)
+		}
+	}()
+
+	connection, err := grpc.NewClient("passthrough:///cosi-test",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			connection, err := listener.DialContext(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("dial COSI test server: %w", err)
+			}
+
+			return connection, nil
+		}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, connection.Close())
+	})
+
+	client := spec.NewProvisionerClient(connection)
 
 	testCases := []struct {
 		name       string
 		parameters map[string]string
+		wantError  string
 	}{
-		{name: "versioning", parameters: map[string]string{"versioning": "invalid"}},
-		{name: "retention without lock", parameters: map[string]string{"retentionMode": "GOVERNANCE", "retentionDays": "30"}},
-		{name: "suspended locked bucket", parameters: map[string]string{"objectLockEnabled": "true", "versioning": "Suspended"}},
-		{name: "lifecycle", parameters: map[string]string{"lifecyclePolicy": "not JSON"}},
+		{
+			name: "invalid versioning", parameters: map[string]string{"versioning": "invalid"},
+			wantError: "versioning must be Enabled or Suspended",
+		},
+		{
+			name: "empty versioning", parameters: map[string]string{"versioning": ""},
+			wantError: "versioning must be Enabled or Suspended",
+		},
+		{
+			name: "invalid object lock", parameters: map[string]string{"objectLockEnabled": "yes"},
+			wantError: "objectLockEnabled must be true or false",
+		},
+		{
+			name: "empty object lock", parameters: map[string]string{"objectLockEnabled": ""},
+			wantError: "objectLockEnabled must be true or false",
+		},
+		{
+			name: "retention without lock", parameters: map[string]string{"retentionMode": "GOVERNANCE", "retentionDays": "30"},
+			wantError: "retention requires objectLockEnabled=true",
+		},
+		{
+			name: "suspended locked bucket", parameters: map[string]string{"objectLockEnabled": "true", "versioning": "Suspended"},
+			wantError: "object lock requires enabled versioning",
+		},
+		{
+			name: "invalid retention mode", parameters: map[string]string{"objectLockEnabled": "true", "retentionMode": "invalid", "retentionDays": "30"},
+			wantError: "retentionMode must be GOVERNANCE or COMPLIANCE",
+		},
+		{
+			name: "missing retention mode", parameters: map[string]string{"objectLockEnabled": "true", "retentionDays": "30"},
+			wantError: "retentionMode must be GOVERNANCE or COMPLIANCE",
+		},
+		{
+			name: "missing retention duration", parameters: map[string]string{"objectLockEnabled": "true", "retentionMode": "GOVERNANCE"},
+			wantError: "retention requires exactly one of retentionDays or retentionYears",
+		},
+		{
+			name:       "conflicting durations",
+			parameters: map[string]string{"objectLockEnabled": "true", "retentionMode": "GOVERNANCE", "retentionDays": "30", "retentionYears": "1"},
+			wantError:  "retention requires exactly one of retentionDays or retentionYears",
+		},
+		{
+			name: "negative retention", parameters: map[string]string{"objectLockEnabled": "true", "retentionMode": "GOVERNANCE", "retentionDays": "-1"},
+			wantError: "retentionDays must be a positive 32-bit integer",
+		},
+		{
+			name: "zero retention", parameters: map[string]string{"objectLockEnabled": "true", "retentionMode": "GOVERNANCE", "retentionDays": "0"},
+			wantError: "retentionDays must be a positive 32-bit integer",
+		},
+		{
+			name: "non-numeric retention", parameters: map[string]string{"objectLockEnabled": "true", "retentionMode": "GOVERNANCE", "retentionDays": "abc"},
+			wantError: "retentionDays must be a positive 32-bit integer",
+		},
+		{
+			name: "retention overflow", parameters: map[string]string{"objectLockEnabled": "true", "retentionMode": "COMPLIANCE", "retentionYears": "2147483648"},
+			wantError: "retentionYears must be a positive 32-bit integer",
+		},
+		{
+			name: "invalid lifecycle JSON", parameters: map[string]string{"lifecyclePolicy": "not JSON"},
+			wantError: "invalid lifecyclePolicy JSON",
+		},
+		{
+			name: "unknown lifecycle field", parameters: map[string]string{"lifecyclePolicy": `{"Rulez":[]}`},
+			wantError: "unknown field",
+		},
+		{
+			name: "multiple JSON values", parameters: map[string]string{"lifecyclePolicy": `{} {}`},
+			wantError: "lifecyclePolicy must contain exactly one JSON object",
+		},
+		{
+			name: "empty lifecycle", parameters: map[string]string{"lifecyclePolicy": `{"Rules":[]}`},
+			wantError: "lifecyclePolicy must contain at least one rule",
+		},
+		{
+			name: "null lifecycle", parameters: map[string]string{"lifecyclePolicy": `null`},
+			wantError: "lifecyclePolicy must contain at least one rule",
+		},
+		{
+			name: "missing lifecycle status", parameters: map[string]string{"lifecyclePolicy": `{"Rules":[{"Filter":{"Prefix":""},"Expiration":{"Days":30}}]}`},
+			wantError: "each lifecycle rule must have Status Enabled or Disabled",
+		},
+		{
+			name: "missing lifecycle filter", parameters: map[string]string{"lifecyclePolicy": `{"Rules":[{"Status":"Enabled","Expiration":{"Days":30}}]}`},
+			wantError: "each lifecycle rule must specify Filter",
+		},
+		{
+			name: "missing lifecycle action", parameters: map[string]string{"lifecyclePolicy": `{"Rules":[{"Status":"Enabled","Filter":{"Prefix":""}}]}`},
+			wantError: "each lifecycle rule must specify an action",
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			server := Server{}
-			response, err := server.DriverCreateBucket(context.Background(), &spec.DriverCreateBucketRequest{
-				BucketId: "bucket", Parameters: tc.parameters,
+			ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
+			defer cancel()
+
+			response, err := client.DriverCreateBucket(ctx, &spec.DriverCreateBucketRequest{
+				BucketId: "bucket", Protocols: []*spec.ObjectProtocol{s3Protocol()}, Parameters: tc.parameters,
 			})
 			require.Equal(t, codes.InvalidArgument, status.Code(err))
+			require.Contains(t, status.Convert(err).Message(), "invalid bucket parameters: ")
+			require.Contains(t, status.Convert(err).Message(), tc.wantError)
 			require.Nil(t, response)
+			require.Zero(t, backend.calls.Load(), "invalid parameters must not reach the backend")
 		})
 	}
 }
