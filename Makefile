@@ -35,3 +35,8 @@ lint:
 .PHONY: test
 test:
 	go test ./pkg/...
+
+.PHONY: test-helm
+test-helm:
+	@command -v helm >/dev/null 2>&1 || { echo "helm is required for chart tests"; exit 1; }
+	go test ./test -run TestHelm -count=1

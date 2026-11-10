@@ -1,35 +1,63 @@
+{{- $roleName := printf "%s-%s-cosi-provisioner" .Release.Namespace .Release.Name -}}
 ---
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
-  name: objectstorage-provisioner-role
+  name: {{ $roleName | quote }}
   labels:
     app.kubernetes.io/name: cloudian-cosi-driver
 rules:
 - apiGroups: ["objectstorage.k8s.io"]
-  resources: ["buckets", "bucketaccesses", "bucketaccessclasses", "buckets/status", "bucketaccesses/status", "bucketclaims", "bucketclaims/status"]
-  verbs: ["get", "list", "watch", "update", "create", "delete"]
-- apiGroups: ["coordination.k8s.io"]
-  resources: ["leases"]
-  verbs: ["get", "watch", "list", "delete", "update", "create"]
+  resources: ["buckets", "bucketaccesses"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: ["objectstorage.k8s.io"]
+  resources: ["buckets/status", "bucketaccesses/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["objectstorage.k8s.io"]
+  resources: ["buckets/finalizers", "bucketaccesses/finalizers"]
+  verbs: ["update"]
 - apiGroups: [""]
-  resources: ["secrets", "events"]
-  verbs: ["get", "delete", "update", "create", "list", "patch"]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "update", "patch"]
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
-  name: objectstorage-provisioner-role-binding
+  name: {{ $roleName | quote }}
   labels:
     app.kubernetes.io/name: cloudian-cosi-driver
 subjects:
   - kind: ServiceAccount
     name: objectstorage-provisioner-sa
-    namespace: default
-  - kind: ServiceAccount
-    name: default
-    namespace: default
+    namespace: {{ .Release.Namespace | quote }}
 roleRef:
   kind: ClusterRole
-  name: objectstorage-provisioner-role
+  name: {{ $roleName | quote }}
+  apiGroup: rbac.authorization.k8s.io
+---
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: objectstorage-provisioner-leader-election
+  namespace: {{ .Release.Namespace | quote }}
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "create", "update", "patch"]
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: objectstorage-provisioner-leader-election
+  namespace: {{ .Release.Namespace | quote }}
+subjects:
+  - kind: ServiceAccount
+    name: objectstorage-provisioner-sa
+    namespace: {{ .Release.Namespace | quote }}
+roleRef:
+  kind: Role
+  name: objectstorage-provisioner-leader-election
   apiGroup: rbac.authorization.k8s.io

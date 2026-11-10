@@ -3,6 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: cloudian-cosi-driver
+  namespace: {{ .Release.Namespace | quote }}
   labels:
     app.kubernetes.io/name: cloudian-cosi-driver
     app.kubernetes.io/part-of: cloudian-cosi-driver
@@ -16,10 +17,15 @@ spec:
       labels:
         app.kubernetes.io/name: cloudian-cosi-driver
     spec:
+      serviceAccountName: objectstorage-provisioner-sa
+      securityContext:
+        fsGroup: 65532
       containers:
         - name: cloudian-cosi-driver
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: "{{ .Values.image.imagePullPolicy }}"
+          command: ["/bin/sh", "-c"]
+          args: ["umask 0007; exec /entrypoint.sh"]
           volumeMounts:
             - mountPath: /var/lib/cosi
               name: socket
@@ -30,15 +36,15 @@ spec:
 {{ end }}
           env:
           - name: S3_REGION
-            value: {{ .Values.s3.region }}
+            value: {{ .Values.s3.region | quote }}
           - name: S3_ENDPOINT
-            value: {{ .Values.s3.s3Endpoint }}
+            value: {{ .Values.s3.s3Endpoint | quote }}
           - name: IAM_ENDPOINT
-            value: {{ .Values.s3.iamEndpoint }}
+            value: {{ .Values.s3.iamEndpoint | quote }}
 {{- $admin := .Values.admin | default dict }}
 {{- if $admin.endpoint }}
           - name: ADMIN_ENDPOINT
-            value: {{ $admin.endpoint }}
+            value: {{ $admin.endpoint | quote }}
 {{- end }}
           - name: DISABLE_TLS_CERTIFICATE_CHECK
             value: "{{ default false .Values.disableTLSCertificateCheck }}"
@@ -46,14 +52,32 @@ spec:
           - secretRef:
               name: {{ .Values.existingCredentialsSecret | default "cloudian-cosi-secret" }}
         - name: objectstorage-driver-sidecar
-          image: "{{ .Values.sidecar.image.repository }}:{{ .Values.sidecar.image.tag }}"
+          image: "{{ required "sidecar.image.repository must reference a COSI v1alpha2 sidecar image; see docs/quick-start.md" .Values.sidecar.image.repository }}:{{ required "sidecar.image.tag must identify a COSI v1alpha2 build compatible with commit 274540c69400" .Values.sidecar.image.tag }}"
           imagePullPolicy: "{{ .Values.sidecar.image.imagePullPolicy }}"
-          args: ["--debug", "-v", "100"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          args:
+            {{- toYaml .Values.sidecar.args | nindent 12 }}
           env:
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
+            - name: COSI_ENDPOINT
+              value: unix:///var/lib/cosi/cosi.sock
+          ports:
+            - name: health
+              containerPort: 8081
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
           volumeMounts:
             - mountPath: /var/lib/cosi
               name: socket

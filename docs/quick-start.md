@@ -3,23 +3,82 @@
 
 ## Dependencies
 
-`kubectl` - v1.23+
+`kubectl` compatible with your Kubernetes cluster. The cluster must support the CRDs from the pinned COSI v1alpha2 revision; do not assume the previous v1alpha1 Kubernetes requirements still apply.
 
 `helm` - v3.8+ due to support for OCI registries
 
 ## Install
 
-1. Apply the COSI v1alpha2 API and Controller. The driver uses the COSI proto at this pinned upstream commit:
-```
-kubectl apply -k 'https://github.com/kubernetes-sigs/container-object-storage-interface//?ref=274540c69400dc1e13278b149a4e073339cefde2'
+1. Prepare compatible images. The driver uses the COSI proto at commit `274540c69400dc1e13278b149a4e073339cefde2`. Use controller and sidecar builds from that revision. The chart intentionally requires `sidecar.image.repository` and `sidecar.image.tag`; the old 2024 `objectstorage-sidecar` image and v1alpha1 releases are not compatible. A tag alone does not prove compatibility: verify the source revision of any pre-built image you use.
+
+For example, build and publish your own controller and sidecar images, replacing `registry.example.com` with your registry:
+
+```sh
+git clone https://github.com/kubernetes-sigs/container-object-storage-interface.git cosi-v1alpha2
+git -C cosi-v1alpha2 checkout 274540c69400dc1e13278b149a4e073339cefde2
+docker build -f cosi-v1alpha2/controller/Dockerfile -t registry.example.com/cosi-controller:274540c69400 cosi-v1alpha2
+docker build -f cosi-v1alpha2/sidecar/Dockerfile -t registry.example.com/cosi-sidecar:274540c69400 cosi-v1alpha2
+docker push registry.example.com/cosi-controller:274540c69400
+docker push registry.example.com/cosi-sidecar:274540c69400
 ```
 
-2. Generate a [values.yaml](../helm/cosi-driver/values.yaml) to reflect your HyperStore configuration. The driver supports S3 key authentication. It uses IAM-generated access keys when system-admin credentials are omitted, and HyperStore users when they are configured.
+2. Deploy the pinned COSI CRDs and controller with your controller image override. The driver chart installs neither the CRDs nor the central controller. Use a Kustomize overlay such as `cosi-install/kustomization.yaml`:
 
-3. Install using the values.yaml you just created:
+```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://github.com/kubernetes-sigs/container-object-storage-interface//?ref=274540c69400dc1e13278b149a4e073339cefde2
+images:
+  - name: gcr.io/k8s-staging-sig-storage/objectstorage-controller
+    newName: registry.example.com/cosi-controller
+    newTag: "274540c69400"
 ```
-helm install cloudian-cosi-driver oci://quay.io/cloudian/cosi-driver --version 0.0.7 -f values.yaml
+
+```sh
+kubectl apply -k cosi-install
 ```
+
+3. Build and publish the driver from this repository, or use a verified v1alpha2 build. The chart's `appVersion` remains the development image tag `v0.0.0`; it does not identify a published alpha2 release. For example, from this repository root:
+
+```sh
+make image
+docker tag cloudian-cosi-driver:v0.0.0 registry.example.com/cloudian-cosi-driver:v1alpha2
+docker push registry.example.com/cloudian-cosi-driver:v1alpha2
+```
+
+4. Configure your HyperStore endpoints and credentials using the chart's [values.yaml](../helm/cosi-driver/values.yaml). In your installation overrides, set the images you prepared:
+
+```yaml
+image:
+  repository: registry.example.com/cloudian-cosi-driver
+  tag: "v1alpha2"
+sidecar:
+  image:
+    repository: registry.example.com/cosi-sidecar
+    tag: "274540c69400"
+```
+
+All registry and tag values above are examples for images you build; they are not published image locations. Make sure your cluster can pull them. The default S3 credentials in the values file are placeholders and must be replaced, or use `existingCredentialsSecret` containing `S3_ACCESS_KEY` and `S3_SECRET_KEY`.
+
+The chart defaults to IAM-generated S3 keys: leave `admin.username` and `admin.password` empty and supply the IAM endpoint. For HyperStore user-based keys, configure `admin.endpoint`, `admin.username`, `admin.password`, and `admin.group`, or use the corresponding existing-secret fields (`ADMIN_USER`, `ADMIN_PASSWORD`, and `GROUP`) together with `admin.endpoint`. COSI `authenticationType` remains `Key` for either backend.
+
+5. Install from this source chart using your overrides:
+
+```sh
+helm upgrade --install cloudian-cosi-driver ./helm/cosi-driver \
+  --namespace cloudian-cosi --create-namespace -f values.yaml
+```
+
+Do not use the old `0.0.7` chart release for this alpha2 driver. An existing v1alpha1 installation needs a coordinated CRD/controller/sidecar/driver migration and resource conversion, not just a Helm image update. Back up existing resources and credentials and review deletion policies before migrating; this chart does not convert resources or force-remove finalizers.
+
+### Sidecar Runtime And Permissions
+
+The chart deploys the driver and v1alpha2 sidecar with a shared socket volume. `COSI_ENDPOINT` points to `unix:///var/lib/cosi/cosi.sock`. The sidecar uses controller-runtime/Zap arguments, not the old `--debug -v` flags. Its default arguments enable leader election, disable metrics, and expose readiness/liveness probes on port 8081. If overriding `sidecar.args`, keep the health endpoint on that port or adjust the probes as well. These health probes are not HyperStore connectivity checks.
+
+The pod uses shared group 65532, and the driver starts through `/bin/sh -c 'umask 0007; exec /entrypoint.sh'` so its Unix socket is writable by that group without granting world access. The sidecar runs as user/group 65532 without privilege escalation. Custom driver images must provide the shell and entrypoint used by this repository's image. The driver still starts as root to install custom CA certificates; the chart does not switch the driver container to a non-root identity.
+
+The pod uses the dedicated ServiceAccount in the Helm release namespace. Sidecar RBAC includes Bucket/BucketAccess reads and updates, status patches, finalizer updates, Secrets, and Events. Leader-election Lease permissions are limited to the release namespace. BucketClaim and class reconciliation remains the central controller's responsibility. The chart does not grant these privileges to the namespace's default ServiceAccount. ClusterRole and ClusterRoleBinding names include the release namespace and name.
 
 ## Create a Bucket
 

@@ -4,7 +4,7 @@ This repository contains the Cloudian [Container Object Storage Interface (COSI)
 
 # Getting Started
 
-To deploy the pre-built containers, see [Quick Start](docs/quick-start.md).
+For installation and image compatibility requirements, see [Quick Start](docs/quick-start.md). The Helm chart targets v1alpha2 and requires an explicit compatible sidecar image; its defaults no longer point to the old v1alpha1 sidecar.
 
 Bucket creation supports HyperStore storage policy selection, S3 versioning, Object Lock with default retention, and lifecycle rules for current and noncurrent versions. Configure these through `BucketClass.spec.parameters` and select the class from a BucketClaim. See [Bucket Configuration Parameters](docs/quick-start.md#bucket-configuration-parameters) for parameter names, examples, permissions, and retention/deletion caveats.
 
@@ -40,3 +40,5 @@ make image
 ### Testing
 
 To build a dev version of the image, then bring up a k3d test environment and load this image see `test/deploy.sh`.
+
+Run `make test-helm` to validate chart rendering, sidecar settings, release-namespace wiring, and RBAC. These tests require Helm and do not deploy anything to a cluster.
