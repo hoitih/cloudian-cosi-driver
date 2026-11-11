@@ -13,7 +13,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/grpc v1.82.0
 	k8s.io/klog/v2 v2.140.0
-	sigs.k8s.io/container-object-storage-interface/proto v0.0.0-20261019183510-274540c69400
+	sigs.k8s.io/container-object-storage-interface/proto v0.2.2
 )
 
 require (

@@ -19,6 +19,5 @@ func TestDriverGetInfo(t *testing.T) {
 	actualName := response.GetName()
 
 	require.Equal(t, expectedName, actualName, fmt.Sprintf("expected driver name '%s', got '%s'", expectedName, actualName))
-	require.Equal(t, []*spec.ObjectProtocol{{Type: spec.ObjectProtocol_S3}}, response.GetSupportedProtocols())
 	require.NoError(t, err)
 }

@@ -3,23 +3,22 @@
 
 ## Dependencies
 
-`kubectl` compatible with your Kubernetes cluster. The cluster must support the CRDs from the pinned COSI v1alpha2 revision; do not assume the previous v1alpha1 Kubernetes requirements still apply.
+`kubectl` compatible with your Kubernetes cluster. Use the COSI v1alpha1 CRDs, controller, and sidecar from the pinned `v0.2.2` release.
 
 `helm` - v3.8+ due to support for OCI registries
 
 ## Install
 
-1. Prepare compatible images. The driver uses the COSI proto at commit `274540c69400dc1e13278b149a4e073339cefde2`. Use controller and sidecar builds from that revision. The chart intentionally requires `sidecar.image.repository` and `sidecar.image.tag`; the old 2024 `objectstorage-sidecar` image and v1alpha1 releases are not compatible. A tag alone does not prove compatibility: verify the source revision of any pre-built image you use.
+1. Prepare compatible images. This branch uses the COSI `v0.2.2` proto module, which implements the `v1alpha1` API. Use controller and sidecar builds from that release. The chart intentionally requires `sidecar.image.repository` and `sidecar.image.tag`; v1alpha2 sidecar builds are not compatible. A tag alone does not prove compatibility: verify the source revision of any pre-built image you use.
 
 For example, build and publish your own controller and sidecar images, replacing `registry.example.com` with your registry:
 
 ```sh
-git clone https://github.com/kubernetes-sigs/container-object-storage-interface.git cosi-v1alpha2
-git -C cosi-v1alpha2 checkout 274540c69400dc1e13278b149a4e073339cefde2
-docker build -f cosi-v1alpha2/controller/Dockerfile -t registry.example.com/cosi-controller:274540c69400 cosi-v1alpha2
-docker build -f cosi-v1alpha2/sidecar/Dockerfile -t registry.example.com/cosi-sidecar:274540c69400 cosi-v1alpha2
-docker push registry.example.com/cosi-controller:274540c69400
-docker push registry.example.com/cosi-sidecar:274540c69400
+git clone --branch v0.2.2 --depth 1 https://github.com/kubernetes-sigs/container-object-storage-interface.git cosi-v1alpha1
+docker build -f cosi-v1alpha1/controller/Dockerfile -t registry.example.com/cosi-controller:v0.2.2 cosi-v1alpha1
+docker build -f cosi-v1alpha1/sidecar/Dockerfile -t registry.example.com/cosi-sidecar:v0.2.2 cosi-v1alpha1
+docker push registry.example.com/cosi-controller:v0.2.2
+docker push registry.example.com/cosi-sidecar:v0.2.2
 ```
 
 2. Deploy the pinned COSI CRDs and controller with your controller image override. The driver chart installs neither the CRDs nor the central controller. Use a Kustomize overlay such as `cosi-install/kustomization.yaml`:
@@ -28,23 +27,23 @@ docker push registry.example.com/cosi-sidecar:274540c69400
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - https://github.com/kubernetes-sigs/container-object-storage-interface//?ref=274540c69400dc1e13278b149a4e073339cefde2
+  - https://github.com/kubernetes-sigs/container-object-storage-interface//?ref=v0.2.2
 images:
   - name: gcr.io/k8s-staging-sig-storage/objectstorage-controller
     newName: registry.example.com/cosi-controller
-    newTag: "274540c69400"
+    newTag: "v0.2.2"
 ```
 
 ```sh
 kubectl apply -k cosi-install
 ```
 
-3. Build and publish the driver from this repository, or use a verified v1alpha2 build. The chart's `appVersion` remains the development image tag `v0.0.0`; it does not identify a published alpha2 release. For example, from this repository root:
+3. Build and publish the driver from this branch. The chart's `appVersion` remains the development image tag `v0.0.0`; it does not identify a published driver release. For example, from this repository root:
 
 ```sh
 make image
-docker tag cloudian-cosi-driver:v0.0.0 registry.example.com/cloudian-cosi-driver:v1alpha2
-docker push registry.example.com/cloudian-cosi-driver:v1alpha2
+docker tag cloudian-cosi-driver:v0.0.0 registry.example.com/cloudian-cosi-driver:v1alpha1-improvements
+docker push registry.example.com/cloudian-cosi-driver:v1alpha1-improvements
 ```
 
 4. Configure your HyperStore endpoints and credentials using the chart's [values.yaml](../helm/cosi-driver/values.yaml). In your installation overrides, set the images you prepared:
@@ -52,16 +51,16 @@ docker push registry.example.com/cloudian-cosi-driver:v1alpha2
 ```yaml
 image:
   repository: registry.example.com/cloudian-cosi-driver
-  tag: "v1alpha2"
+  tag: "v1alpha1-improvements"
 sidecar:
   image:
     repository: registry.example.com/cosi-sidecar
-    tag: "274540c69400"
+    tag: "v0.2.2"
 ```
 
 All registry and tag values above are examples for images you build; they are not published image locations. Make sure your cluster can pull them. The default S3 credentials in the values file are placeholders and must be replaced, or use `existingCredentialsSecret` containing `S3_ACCESS_KEY` and `S3_SECRET_KEY`.
 
-The chart defaults to IAM-generated S3 keys: leave `admin.username` and `admin.password` empty and supply the IAM endpoint. For HyperStore user-based keys, configure `admin.endpoint`, `admin.username`, `admin.password`, and `admin.group`, or use the corresponding existing-secret fields (`ADMIN_USER`, `ADMIN_PASSWORD`, and `GROUP`) together with `admin.endpoint`. COSI `authenticationType` remains `Key` for either backend.
+For IAM-generated S3 keys, choose `BucketAccessClass.authenticationType: IAM`, leave `admin.username` and `admin.password` empty, and supply the IAM endpoint. For HyperStore user-based keys, choose `authenticationType: Key` and configure `admin.endpoint`, `admin.username`, `admin.password`, and `admin.group`, or use the corresponding existing-secret fields (`ADMIN_USER`, `ADMIN_PASSWORD`, and `GROUP`) together with `admin.endpoint`. IAM requests continue to use IAM even if admin credentials are configured.
 
 5. Install from this source chart using your overrides:
 
@@ -70,15 +69,15 @@ helm upgrade --install cloudian-cosi-driver ./helm/cosi-driver \
   --namespace cloudian-cosi --create-namespace -f values.yaml
 ```
 
-Do not use the old `0.0.7` chart release for this alpha2 driver. An existing v1alpha1 installation needs a coordinated CRD/controller/sidecar/driver migration and resource conversion, not just a Helm image update. Back up existing resources and credentials and review deletion policies before migrating; this chart does not convert resources or force-remove finalizers.
+Use the chart from this branch (`0.1.0-alpha1.1`) to include its namespace, RBAC, and socket-security fixes. The old `0.0.7` chart does not contain these improvements. Existing v1alpha1 resources do not require conversion to alpha2 schemas. Back up resources and credentials and review deletion policies before upgrading; this chart does not convert resources or force-remove finalizers. Moving from an already-installed v1alpha2 environment to this branch requires a separate, planned API migration.
 
 ### Sidecar Runtime And Permissions
 
-The chart deploys the driver and v1alpha2 sidecar with a shared socket volume. `COSI_ENDPOINT` points to `unix:///var/lib/cosi/cosi.sock`. The sidecar uses controller-runtime/Zap arguments, not the old `--debug -v` flags. Its default arguments enable leader election, disable metrics, and expose readiness/liveness probes on port 8081. If overriding `sidecar.args`, keep the health endpoint on that port or adjust the probes as well. These health probes are not HyperStore connectivity checks.
+The chart deploys the driver and v1alpha1 sidecar with a shared socket volume. The `--driver-addr=unix:///var/lib/cosi/cosi.sock` flag selects the driver endpoint. Default sidecar arguments are `--debug=false` and `--v=2`; keep gRPC debug logging disabled because the upstream debug logger includes requests and responses containing credentials. The v0.2.2 sidecar manages leader election internally and does not support the v1alpha2 controller-runtime/Zap flags or `/readyz` and `/healthz` endpoints. The chart therefore does not install those incompatible HTTP probes.
 
 The pod uses shared group 65532, and the driver starts through `/bin/sh -c 'umask 0007; exec /entrypoint.sh'` so its Unix socket is writable by that group without granting world access. The sidecar runs as user/group 65532 without privilege escalation. Custom driver images must provide the shell and entrypoint used by this repository's image. The driver still starts as root to install custom CA certificates; the chart does not switch the driver container to a non-root identity.
 
-The pod uses the dedicated ServiceAccount in the Helm release namespace. Sidecar RBAC includes Bucket/BucketAccess reads and updates, status patches, finalizer updates, Secrets, and Events. Leader-election Lease permissions are limited to the release namespace. BucketClaim and class reconciliation remains the central controller's responsibility. The chart does not grant these privileges to the namespace's default ServiceAccount. ClusterRole and ClusterRoleBinding names include the release namespace and name.
+The pod uses the dedicated ServiceAccount in the Helm release namespace. Sidecar RBAC includes Bucket/BucketAccess reads and updates, BucketAccess deletion, BucketClaim reads and updates, class reads, status/finalizer updates, Secrets, and Events. `POD_NAMESPACE` is set from the pod namespace, and leader-election Lease permissions are limited to that namespace. The chart does not grant these privileges to the namespace's default ServiceAccount. ClusterRole and ClusterRoleBinding names include the release namespace and name.
 
 ## Create a Bucket
 
@@ -86,13 +85,12 @@ The pod uses the dedicated ServiceAccount in the Helm release namespace. Sidecar
 
 Create a yaml file containing your preferred bucket class configuration, e.g. `bucketclass.yaml`:
 ```
-apiVersion: objectstorage.k8s.io/v1alpha2
+apiVersion: objectstorage.k8s.io/v1alpha1
 kind: BucketClass
 metadata:
   name: cloudian-bucketclass
-spec:
-  driverName: cloudian-cosi-driver
-  deletionPolicy: Delete
+driverName: cloudian-cosi-driver
+deletionPolicy: Delete
 ```
 
 Apply the BucketClass Resource:
@@ -104,7 +102,7 @@ kubectl apply -f bucketclass.yaml
 
 Create a yaml file with your preferred bucket claim configuration, e.g. `bucketclaim.yaml`:
 ```
-apiVersion: objectstorage.k8s.io/v1alpha2
+apiVersion: objectstorage.k8s.io/v1alpha1
 kind: BucketClaim
 metadata:
   name: cloudian-bucketclaim
@@ -122,7 +120,7 @@ A `bucket` kubernetes resource object will then be created as well as an actual 
 
 ### Bucket Configuration Parameters
 
-Configure these options in `BucketClass.spec.parameters`. A BucketClaim selects the class through `spec.bucketClassName`; neither the v1alpha1 nor v1alpha2 BucketClaim schema has a free-form parameters field. All parameter values are strings.
+Configure these options in the top-level `BucketClass.parameters` field. A BucketClaim selects the class through `spec.bucketClassName`; the v1alpha1 BucketClaim schema has no free-form parameters field. All parameter values are strings.
 
 | Parameter | Values | Behavior when omitted |
 | --- | --- | --- |
@@ -179,43 +177,42 @@ Supplying `lifecyclePolicy` replaces the bucket's lifecycle rule set; it does no
 This class protects new object versions for 30 days and configures lifecycle cleanup for all keys:
 
 ```yaml
-apiVersion: objectstorage.k8s.io/v1alpha2
+apiVersion: objectstorage.k8s.io/v1alpha1
 kind: BucketClass
 metadata:
   name: cloudian-protected-30d
-spec:
-  driverName: cloudian-cosi-driver
-  deletionPolicy: Retain
-  parameters:
-    storagePolicyID: "your-storage-policy-id"
-    objectLockEnabled: "true"
-    versioning: "Enabled"
-    retentionMode: "COMPLIANCE"
-    retentionDays: "30"
-    lifecyclePolicy: |
-      {
-        "Rules": [
-          {
-            "ID": "expire-data",
-            "Status": "Enabled",
-            "Filter": {"Prefix": ""},
-            "Expiration": {"Days": 30},
-            "NoncurrentVersionExpiration": {"NoncurrentDays": 1}
-          },
-          {
-            "ID": "remove-expired-delete-markers",
-            "Status": "Enabled",
-            "Filter": {"Prefix": ""},
-            "Expiration": {"ExpiredObjectDeleteMarker": true}
-          }
-        ]
-      }
+driverName: cloudian-cosi-driver
+deletionPolicy: Retain
+parameters:
+  storagePolicyID: "your-storage-policy-id"
+  objectLockEnabled: "true"
+  versioning: "Enabled"
+  retentionMode: "COMPLIANCE"
+  retentionDays: "30"
+  lifecyclePolicy: |
+    {
+      "Rules": [
+        {
+          "ID": "expire-data",
+          "Status": "Enabled",
+          "Filter": {"Prefix": ""},
+          "Expiration": {"Days": 30},
+          "NoncurrentVersionExpiration": {"NoncurrentDays": 1}
+        },
+        {
+          "ID": "remove-expired-delete-markers",
+          "Status": "Enabled",
+          "Filter": {"Prefix": ""},
+          "Expiration": {"ExpiredObjectDeleteMarker": true}
+        }
+      ]
+    }
 ```
 
 Reference it from a claim:
 
 ```yaml
-apiVersion: objectstorage.k8s.io/v1alpha2
+apiVersion: objectstorage.k8s.io/v1alpha1
 kind: BucketClaim
 metadata:
   name: cloudian-protected-data
@@ -242,7 +239,7 @@ HyperStore validates the remaining S3-specific constraints and supported actions
 
 Configuration is applied during dynamic provisioning, not to statically imported buckets or as a continuous configuration controller. Object Lock is requested during bucket creation; the driver then applies versioning, Object Lock/default retention, and lifecycle configuration in that order. On a partial provisioning failure, the driver returns an error and reapplies the requested configuration on a COSI create retry; it does not delete the partially configured bucket.
 
-An omitted `versioning` or `lifecyclePolicy` does not send a request for that setting, except that Object Lock implies enabled versioning. With `objectLockEnabled: "true"`, the driver sends the requested Object Lock configuration, including a default retention rule only when specified; do not rely on an omitted retention rule to preserve an externally configured rule. BucketClass specs are immutable, so define a new class to provision new buckets with different settings.
+An omitted `versioning` or `lifecyclePolicy` does not send a request for that setting, except that Object Lock implies enabled versioning. With `objectLockEnabled: "true"`, the driver sends the requested Object Lock configuration, including a default retention rule only when specified; do not rely on an omitted retention rule to preserve an externally configured rule. Changing a class does not continuously reconfigure already-created buckets. Define a new class to provision new buckets with different settings.
 
 ## Delete a Bucket
 
@@ -267,16 +264,18 @@ BucketClaim, BucketAccess, and BucketAccessClass reconciliation and Kubernetes f
 
 Create a yaml file containing your preferred bucket access class configuration, e.g. `bucketaccessclass.yaml`:
 ```
-apiVersion: objectstorage.k8s.io/v1alpha2
+apiVersion: objectstorage.k8s.io/v1alpha1
 kind: BucketAccessClass
 metadata:
   name: cloudian-bucketaccessclass                                  
-spec:
-  driverName: cloudian-cosi-driver
-  authenticationType: Key
-  multiBucketAccess: SingleBucket
+driverName: cloudian-cosi-driver
+authenticationType: IAM
+parameters:
+  objectDataAccessMode: ReadWrite
 ```
-The driver provisions S3 access keys through IAM by default. If HyperStore system-admin credentials are configured, it provisions HyperStore users instead.
+Choose `IAM` for IAM users and S3 access keys, or `Key` for HyperStore users (requires configured admin credentials). These are explicit v1alpha1 authentication types. The driver does not implement automatic Kubernetes token federation.
+
+Optional driver-specific access parameters are `objectDataAccessMode`, `objectMetadataAccessMode`, and `bucketMetadataAccessMode`. Each accepts `ReadOnly`, `WriteOnly`, `ReadWrite`, or `Any`. If all three are absent, object data receives the original read/write policy. Once any is provided, an omitted category receives no permissions, and `Any` also grants no permissions for that category. At least one category must grant permissions. These are top-level `BucketAccessClass.parameters`, not native v1alpha2 `accessModes` fields on a BucketAccess.
 
 Apply the BucketAccessClass Resource:
 ```
@@ -287,25 +286,23 @@ kubectl apply -f bucketaccessclass.yaml
 
 Create a yaml file with your preferred bucket access configuration, e.g. `bucketaccess.yaml`:
 ```
-apiVersion: objectstorage.k8s.io/v1alpha2
+apiVersion: objectstorage.k8s.io/v1alpha1
 kind: BucketAccess
 metadata:
   name: cloudian-bucketaccess
 spec:
   bucketAccessClassName: cloudian-bucketaccessclass
+  bucketClaimName: cloudian-bucketclaim
   protocol: S3
-  bucketClaims:
-    - bucketClaimName: cloudian-bucketclaim
-      accessModes:
-        objectData: ReadWrite
-      accessSecretName: cloudian-secret
+  credentialsSecretName: cloudian-secret
+  serviceAccountName: cloudian-application
 ```
 Apply the BucketAccess Resource:
 ```
 kubectl apply -f bucketaccess.yaml
 ```
 
-The access credentials and S3 bucket information are stored in the secret named by `accessSecretName`.
+The v1alpha1 sidecar requires a nonempty `serviceAccountName` for IAM requests; set it to the ServiceAccount used by your workload. For this driver, IAM still returns access keys, not ServiceAccount token credentials. The sidecar stores S3 bucket information and credentials as its `BucketInfo` JSON document in the Secret named by `credentialsSecretName`. It does not use the v1alpha2 flat Secret format.
 
 ## Revoke Bucket Access
 

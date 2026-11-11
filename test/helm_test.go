@@ -37,8 +37,13 @@ type helmContainer struct {
 	Command []string `yaml:"command"`
 	Args    []string `yaml:"args"`
 	Env     []struct {
-		Name  string `yaml:"name"`
-		Value string `yaml:"value"`
+		Name      string `yaml:"name"`
+		Value     string `yaml:"value"`
+		ValueFrom struct {
+			FieldRef struct {
+				FieldPath string `yaml:"fieldPath"`
+			} `yaml:"fieldRef"`
+		} `yaml:"valueFrom"`
 	} `yaml:"env"`
 	EnvFrom []struct {
 		SecretRef struct {
@@ -107,7 +112,7 @@ func renderHelm(t *testing.T, namespace string, arguments ...string) ([]byte, er
 	return output, nil
 }
 
-func TestHelmRequiresV1alpha2SidecarImage(t *testing.T) {
+func TestHelmRequiresV1alpha1SidecarImage(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
@@ -115,10 +120,10 @@ func TestHelmRequiresV1alpha2SidecarImage(t *testing.T) {
 		arguments []string
 		wantError string
 	}{
-		{name: "repository", wantError: "sidecar.image.repository must reference a COSI v1alpha2 sidecar image"},
+		{name: "repository", wantError: "sidecar.image.repository must reference a COSI v1alpha1 sidecar image"},
 		{
 			name: "tag", arguments: []string{"--set", "sidecar.image.repository=example.invalid/cosi-sidecar"},
-			wantError: "sidecar.image.tag must identify a COSI v1alpha2 build",
+			wantError: "sidecar.image.tag must identify a COSI v1alpha1 build",
 		},
 	}
 
@@ -133,7 +138,7 @@ func TestHelmRequiresV1alpha2SidecarImage(t *testing.T) {
 	}
 }
 
-func TestHelmV1alpha2Deployment(t *testing.T) {
+func TestHelmV1alpha1Deployment(t *testing.T) {
 	t.Parallel()
 
 	for _, namespace := range []string{"default", "cosi-system"} {
@@ -142,7 +147,7 @@ func TestHelmV1alpha2Deployment(t *testing.T) {
 
 			output, err := renderHelm(t, namespace,
 				"--set", "sidecar.image.repository=example.invalid/cosi-sidecar",
-				"--set-string", "sidecar.image.tag=274540c69400",
+				"--set-string", "sidecar.image.tag=v0.2.2",
 			)
 			require.NoError(t, err, "%s", output)
 			manifests := decodeHelm(t, output)
@@ -174,19 +179,26 @@ func TestHelmV1alpha2Deployment(t *testing.T) {
 						Verbs: []string{"get", "list", "watch", "update", "patch"},
 					})
 					require.Contains(t, manifest.Rules, helmRule{
-						APIGroups: []string{"objectstorage.k8s.io"}, Resources: []string{"buckets/status", "bucketaccesses/status"}, Verbs: []string{"get", "update", "patch"},
+						APIGroups: []string{"objectstorage.k8s.io"}, Resources: []string{"buckets/status", "bucketaccesses/status", "bucketclaims/status"}, Verbs: []string{"get", "update", "patch"},
 					})
 					require.Contains(t, manifest.Rules, helmRule{
-						APIGroups: []string{"objectstorage.k8s.io"}, Resources: []string{"buckets/finalizers", "bucketaccesses/finalizers"}, Verbs: []string{"update"},
+						APIGroups: []string{"objectstorage.k8s.io"}, Resources: []string{"buckets/finalizers", "bucketaccesses/finalizers", "bucketclaims/finalizers"}, Verbs: []string{"update"},
 					})
 					require.Contains(t, manifest.Rules, helmRule{
 						APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 					})
+					require.Contains(t, manifest.Rules, helmRule{
+						APIGroups: []string{"objectstorage.k8s.io"}, Resources: []string{"bucketclaims"}, Verbs: []string{"get", "list", "watch", "update", "patch"},
+					})
+					require.Contains(t, manifest.Rules, helmRule{
+						APIGroups: []string{"objectstorage.k8s.io"}, Resources: []string{"bucketclasses", "bucketaccessclasses"}, Verbs: []string{"get", "list", "watch"},
+					})
+					require.Contains(t, manifest.Rules, helmRule{
+						APIGroups: []string{"objectstorage.k8s.io"}, Resources: []string{"bucketaccesses"}, Verbs: []string{"delete"},
+					})
 
 					for _, rule := range manifest.Rules {
 						require.NotContains(t, rule.Resources, "leases")
-						require.NotContains(t, rule.Resources, "bucketclaims")
-						require.NotContains(t, rule.Resources, "bucketaccessclasses")
 					}
 				}
 			}
@@ -210,21 +222,22 @@ func assertHelmDeployment(t *testing.T, namespace string, manifest helmManifest)
 		require.NotEqual(t, "ADMIN_ENDPOINT", env.Name)
 	}
 
-	require.Equal(t, "example.invalid/cosi-sidecar:274540c69400", sidecar.Image)
-	require.Contains(t, sidecar.Args, "--leader-elect=true")
+	require.Equal(t, "example.invalid/cosi-sidecar:v0.2.2", sidecar.Image)
+	require.Contains(t, sidecar.Args, "--driver-addr=unix:///var/lib/cosi/cosi.sock")
+	require.Contains(t, sidecar.Args, "--debug=false")
+	require.Contains(t, sidecar.Args, "--v=2")
 	require.NotContains(t, sidecar.Args, "--debug")
-	require.NotContains(t, sidecar.Args, "-v")
+	require.NotContains(t, sidecar.Args, "--debug=true")
+	require.NotContains(t, sidecar.Args, "--leader-elect=true")
 	require.True(t, sidecar.SecurityContext.RunAsNonRoot)
 	require.Equal(t, 65532, sidecar.SecurityContext.RunAsUser)
 	require.Equal(t, 65532, sidecar.SecurityContext.RunAsGroup)
 	require.False(t, sidecar.SecurityContext.AllowPrivilegeEscalation)
-	require.Equal(t, "/readyz", sidecar.ReadinessProbe.HTTPGet.Path)
-	require.Equal(t, "/healthz", sidecar.LivenessProbe.HTTPGet.Path)
-	require.Equal(t, "health", sidecar.ReadinessProbe.HTTPGet.Port)
-	require.Equal(t, "health", sidecar.LivenessProbe.HTTPGet.Port)
+	require.Empty(t, sidecar.ReadinessProbe.HTTPGet.Path)
+	require.Empty(t, sidecar.LivenessProbe.HTTPGet.Path)
 	require.Len(t, sidecar.Env, 1)
-	require.Equal(t, "COSI_ENDPOINT", sidecar.Env[0].Name)
-	require.Equal(t, "unix:///var/lib/cosi/cosi.sock", sidecar.Env[0].Value)
+	require.Equal(t, "POD_NAMESPACE", sidecar.Env[0].Name)
+	require.Equal(t, "metadata.namespace", sidecar.Env[0].ValueFrom.FieldRef.FieldPath)
 }
 
 func decodeHelm(t *testing.T, output []byte) []helmManifest {
@@ -255,7 +268,7 @@ func TestHelmExistingCredentialsAndAdmin(t *testing.T) {
 
 	output, err := renderHelm(t, "cosi-system",
 		"--set", "sidecar.image.repository=example.invalid/cosi-sidecar",
-		"--set-string", "sidecar.image.tag=274540c69400",
+		"--set-string", "sidecar.image.tag=v0.2.2",
 		"--set", "existingCredentialsSecret=existing-credentials",
 		"--set", "admin.endpoint=https://admin.example.invalid",
 	)

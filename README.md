@@ -4,31 +4,31 @@ This repository contains the Cloudian [Container Object Storage Interface (COSI)
 
 # Getting Started
 
-For installation and image compatibility requirements, see [Quick Start](docs/quick-start.md). The Helm chart targets v1alpha2 and requires an explicit compatible sidecar image; its defaults no longer point to the old v1alpha1 sidecar.
+For installation and image compatibility requirements, see [Quick Start](docs/quick-start.md). This branch targets COSI v1alpha1 using the v0.2.2 proto/controller/sidecar release and requires an explicit compatible sidecar image.
 
-Bucket creation supports HyperStore storage policy selection, S3 versioning, Object Lock with default retention, and lifecycle rules for current and noncurrent versions. Configure these through `BucketClass.spec.parameters` and select the class from a BucketClaim. See [Bucket Configuration Parameters](docs/quick-start.md#bucket-configuration-parameters) for parameter names, examples, permissions, and retention/deletion caveats.
+Bucket creation supports HyperStore storage policy selection, S3 versioning, Object Lock with default retention, and lifecycle rules for current and noncurrent versions. Configure these through `BucketClass.parameters` and select the class from a BucketClaim. See [Bucket Configuration Parameters](docs/quick-start.md#bucket-configuration-parameters) for parameter names, examples, permissions, and retention/deletion caveats.
 
 Retention protects object versions from permanent deletion; it does not delete them when the retention period ends. Lifecycle rules schedule cleanup and, with versioning enabled, must also address noncurrent versions and delete markers. See the [Protection And Cleanup Example](docs/quick-start.md#protection-and-cleanup-example) for a 30-day retention policy with lifecycle cleanup and an explanation of the timing. Object Lock is not reversible, and retained data can prevent bucket deletion even when its BucketClass uses `deletionPolicy: Delete`.
 
-## COSI v1alpha2 compatibility
+## COSI v1alpha1 compatibility
 
-This driver targets COSI `v1alpha2` only. It does not register the `v1alpha1` gRPC services, so the COSI API/controller and this driver must be upgraded together. The Quick Start pins the COSI manifests to the upstream commit used by the driver's protobuf dependency; keep those versions aligned because `v1alpha2` is still pre-release.
+This branch preserves the improvements from the v1alpha2 development branch while serving only the `cosi.v1alpha1` gRPC services. Do not deploy it with a v1alpha2 sidecar or v1alpha2-only CRDs. The Go proto module is pinned to `v0.2.2`, which implements the v1alpha1 wire protocol despite the module's release number.
 
-The migration changes both the driver RPC flow and the Kubernetes resource schema:
+The v1alpha1 contract differs from v1alpha2:
 
-- Bucket provisioning now uses `DriverGenerateBucketId` before `DriverCreateBucket`. `DriverGetBucket` is also implemented for existing buckets.
-- `BucketClass` and `BucketAccessClass` configuration is under `spec` in `v1alpha2`.
-- `BucketAccess` now specifies a `protocol` and a `bucketClaims` list. Each entry supplies `accessModes` and an `accessSecretName`; the generated Secret contains the S3 bucket information and credentials.
-- The driver advertises and supports S3 only. The `IAM` option from this driver's `v1alpha1` integration provisioned IAM users and access keys; in `v1alpha2`, that same workflow is requested as `Key` because the API has no separate `IAM` authentication type. HyperStore IAM creates the users and access keys by default. If system-admin credentials are configured, the driver creates HyperStore users instead. COSI `ServiceAccount` authentication is a different mode, based on Kubernetes ServiceAccounts, and is not supported.
-- A `BucketAccess` may reference exactly one bucket. Multi-bucket requests are rejected. Object data, object metadata, and bucket metadata access modes are translated into S3 policy actions.
+- Bucket creation uses the name in `DriverCreateBucket`; there are no `DriverGenerateBucketId` or `DriverGetBucket` RPCs. Existing-bucket imports are handled by the v1alpha1 sidecar rather than by a driver lookup RPC.
+- `BucketClass` and `BucketAccessClass` fields are at the resource's top level, not under `spec`. Retention, lifecycle, Object Lock, and versioning remain configurable through `BucketClass.parameters`.
+- `BucketAccess.spec` selects one `bucketClaimName` and a `credentialsSecretName`. The v1alpha1 sidecar writes its `BucketInfo` JSON document into that Secret.
+- `BucketAccessClass.authenticationType: IAM` creates IAM users and S3 access keys. `Key` creates HyperStore users and requires the admin client. The choice is explicit: configuring admin credentials does not change an IAM request into a Key request. Although the v1alpha1 sidecar requires a `serviceAccountName` for IAM requests, this driver issues keys; it does not implement Kubernetes token federation or automatic workload identity.
+- Native v1alpha2 access modes are unavailable. Granular read/write permissions are retained as driver-specific `BucketAccessClass.parameters`: `objectDataAccessMode`, `objectMetadataAccessMode`, and `bucketMetadataAccessMode`. Without them, the original object-data read/write policy is preserved.
 
-When upgrading existing installations, update the COSI CRDs/controller and convert or recreate alpha1 resources using the `v1alpha2` schemas. Changing only `apiVersion` is not sufficient because fields and access semantics have changed. See the [Quick Start](docs/quick-start.md) for current manifests and examples.
+Idempotent deletion, partial-failure retries, credential-safe driver logging, parameter validation, S3 HTTP tests, and Helm namespace/RBAC/socket-security improvements are retained. Finalizer-removal retry changes remain outside the driver and are not included. See the [Quick Start](docs/quick-start.md) for v1alpha1 manifests and deployment requirements.
 
 # Developing
 
 The repository includes a dev container, inside which it can be built and tested.
 
-Building requires `golang` v1.23 or later, `docker`, and `make` to be installed.
+Building requires `golang` v1.25 or later, `docker`, and `make` to be installed.
 
 ### Building
 

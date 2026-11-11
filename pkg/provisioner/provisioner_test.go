@@ -28,14 +28,6 @@ import (
 	spec "sigs.k8s.io/container-object-storage-interface/proto"
 )
 
-func s3Protocol() *spec.ObjectProtocol {
-	return &spec.ObjectProtocol{Type: spec.ObjectProtocol_S3}
-}
-
-func accessMode(mode spec.AccessMode_Mode) *spec.AccessMode {
-	return &spec.AccessMode{Mode: mode}
-}
-
 func TestDriverCreateBucket(t *testing.T) {
 	t.Parallel()
 
@@ -63,52 +55,28 @@ func TestDriverCreateBucket(t *testing.T) {
 			}
 
 			response, err := server.DriverCreateBucket(context.TODO(), &spec.DriverCreateBucketRequest{
-				BucketId:  tc.name,
-				Protocols: []*spec.ObjectProtocol{s3Protocol()},
+				Name: tc.name,
 			})
 
 			if tc.expectedError {
 				require.Nil(t, response)
 				require.Error(t, err)
 			} else {
-				require.Equal(t, response.GetProtocols().GetS3().GetBucketId(), tc.name)
-				require.Equal(t, response.GetProtocols().GetS3().GetRegion(), region)
+				require.Equal(t, tc.name, response.GetBucketId())
+				require.Equal(t, region, response.GetBucketInfo().GetS3().GetRegion())
 				require.NoError(t, err)
 			}
 		})
 	}
 }
 
-func TestDriverGenerateBucketId(t *testing.T) {
+func TestDriverCreateBucketRequiresName(t *testing.T) {
 	t.Parallel()
 
-	testCases := []struct {
-		name      string
-		request   *spec.DriverGenerateBucketIdRequest
-		wantError bool
-	}{
-		{name: "valid", request: &spec.DriverGenerateBucketIdRequest{Name: "bc-example", Protocols: []*spec.ObjectProtocol{s3Protocol()}}},
-		{name: "empty name", request: &spec.DriverGenerateBucketIdRequest{}, wantError: true},
-		{name: "unsupported protocol", request: &spec.DriverGenerateBucketIdRequest{Name: "bc-example", Protocols: []*spec.ObjectProtocol{{Type: spec.ObjectProtocol_AZURE}}}, wantError: true},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			server := Server{}
-
-			response, err := server.DriverGenerateBucketId(context.Background(), tc.request)
-			if tc.wantError {
-				require.Equal(t, codes.InvalidArgument, status.Code(err))
-
-				return
-			}
-
-			require.NoError(t, err)
-			require.Equal(t, tc.request.GetName(), response.GetBucketId())
-		})
-	}
+	server := Server{}
+	response, err := server.DriverCreateBucket(context.Background(), &spec.DriverCreateBucketRequest{})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	require.Nil(t, response)
 }
 
 type bucketCreationRecorder struct {
@@ -266,7 +234,7 @@ func TestDriverCreateBucketRejectsInvalidConfiguration(t *testing.T) {
 			defer cancel()
 
 			response, err := client.DriverCreateBucket(ctx, &spec.DriverCreateBucketRequest{
-				BucketId: "bucket", Protocols: []*spec.ObjectProtocol{s3Protocol()}, Parameters: tc.parameters,
+				Name: "bucket", Parameters: tc.parameters,
 			})
 			require.Equal(t, codes.InvalidArgument, status.Code(err))
 			require.Contains(t, status.Convert(err).Message(), "invalid bucket parameters: ")
@@ -327,7 +295,7 @@ func TestDriverCreateBucketConfigurationOverHTTP(t *testing.T) {
 	})
 	server := Server{S3Client: client}
 	response, err := server.DriverCreateBucket(context.Background(), &spec.DriverCreateBucketRequest{
-		BucketId: "configured-bucket",
+		Name: "configured-bucket",
 		Parameters: map[string]string{
 			"storagePolicyID": "policy-1", "objectLockEnabled": "true",
 			"retentionMode": "COMPLIANCE", "retentionDays": "30",
@@ -419,7 +387,7 @@ func TestDriverCreateBucketVersioningOverHTTP(t *testing.T) {
 			})
 			server := Server{S3Client: client}
 			response, err := server.DriverCreateBucket(context.Background(), &spec.DriverCreateBucketRequest{
-				BucketId: "versioning-bucket", Parameters: tc.parameters,
+				Name: "versioning-bucket", Parameters: tc.parameters,
 			})
 			require.NoError(t, err)
 			require.NotNil(t, response)
@@ -435,40 +403,6 @@ func TestDriverCreateBucketVersioningOverHTTP(t *testing.T) {
 			if tc.wantStatus != "" {
 				require.Equal(t, tc.wantStatus, (<-requests).Status)
 			}
-		})
-	}
-}
-
-func TestDriverGetBucket(t *testing.T) {
-	t.Parallel()
-
-	testCases := []struct {
-		name         string
-		expectedCode codes.Code
-	}{
-		{name: "existing_bucket"},
-		{name: "get_bucket_not_found", expectedCode: codes.NotFound},
-		{name: "get_bucket_fail", expectedCode: codes.Unknown},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			server := Server{S3Client: s3.ClientMock{}}
-			response, err := server.DriverGetBucket(context.Background(), &spec.DriverGetBucketRequest{
-				BucketId:  tc.name,
-				Protocols: []*spec.ObjectProtocol{s3Protocol()},
-			})
-
-			if tc.expectedCode != codes.OK {
-				require.Equal(t, tc.expectedCode, status.Code(err))
-
-				return
-			}
-
-			require.NoError(t, err)
-			require.Equal(t, tc.name, response.GetProtocols().GetS3().GetBucketId())
 		})
 	}
 }
@@ -532,37 +466,37 @@ func TestDriverGrantBucketAccess(t *testing.T) {
 
 	server := Server{IAMClient: iam.ClientMock{}, S3Client: s3.ClientMock{}, Config: cfg}
 	request := &spec.DriverGrantBucketAccessRequest{
-		AccountName:        "grant_bucket_access_success",
-		Protocol:           s3Protocol(),
-		AuthenticationType: &spec.AuthenticationType{Type: spec.AuthenticationType_KEY},
-		Buckets: []*spec.DriverGrantBucketAccessRequest_AccessedBucket{{
-			BucketId:             "mock-bucket",
-			ObjectDataAccessMode: accessMode(spec.AccessMode_READ_ONLY),
-		}},
+		Name: "grant_bucket_access_success", BucketId: "mock-bucket",
+		AuthenticationType: spec.AuthenticationType_IAM,
+		Parameters:         map[string]string{"objectDataAccessMode": "ReadOnly"},
 	}
 
 	response, err := server.DriverGrantBucketAccess(context.Background(), request)
 	require.NoError(t, err)
-	require.Equal(t, "iam_"+request.GetAccountName(), response.GetAccountId())
-	require.Equal(t, "mockAccessKey", response.GetCredentials().GetS3().GetAccessKeyId())
-	require.Equal(t, "mockSecretKey", response.GetCredentials().GetS3().GetAccessSecretKey())
-	require.Equal(t, "mock-bucket", response.GetBuckets()[0].GetBucketInfo().GetS3().GetBucketId())
+	require.Equal(t, "iam_"+request.GetName(), response.GetAccountId())
+	require.Equal(t, map[string]string{
+		"authenticationType": "IAM", "endpoint": cfg.Endpoints.S3, "region": cfg.Region,
+		"accessKeyID": "mockAccessKey", "accessSecretKey": "mockSecretKey",
+	}, response.GetCredentials()["s3"].GetSecrets())
 }
 
 func TestDriverGrantBucketAccessBackendRoutes(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
-		name          string
-		accountName   string
-		useAdmin      bool
-		wantAccountID string
-		wantError     bool
+		name               string
+		accountName        string
+		useAdmin           bool
+		authenticationType spec.AuthenticationType
+		wantAccountID      string
+		wantError          bool
 	}{
-		{name: "iam_success", accountName: "grant_bucket_access_success", wantAccountID: "iam_grant_bucket_access_success"},
-		{name: "iam_failure", accountName: "grant_bucket_access_create_user_fail", wantError: true},
-		{name: "hyperstore_success", accountName: "grant_bucket_access_success", useAdmin: true, wantAccountID: "key_grant_bucket_access_success"},
-		{name: "hyperstore_failure", accountName: "grant_bucket_access_create_user_fail", useAdmin: true, wantError: true},
+		{name: "iam_success", accountName: "grant_bucket_access_success", authenticationType: spec.AuthenticationType_IAM, wantAccountID: "iam_grant_bucket_access_success"},
+		{name: "iam_failure", accountName: "grant_bucket_access_create_user_fail", authenticationType: spec.AuthenticationType_IAM, wantError: true},
+		{name: "iam_with_admin", accountName: "grant_bucket_access_success", authenticationType: spec.AuthenticationType_IAM, useAdmin: true, wantAccountID: "iam_grant_bucket_access_success"},
+		{name: "hyperstore_success", accountName: "grant_bucket_access_success", authenticationType: spec.AuthenticationType_Key, useAdmin: true, wantAccountID: "key_grant_bucket_access_success"},
+		{name: "hyperstore_failure", accountName: "grant_bucket_access_create_user_fail", authenticationType: spec.AuthenticationType_Key, useAdmin: true, wantError: true},
+		{name: "key_without_admin", accountName: "grant_bucket_access_success", authenticationType: spec.AuthenticationType_Key, wantError: true},
 	}
 
 	for _, tc := range testCases {
@@ -581,13 +515,7 @@ func TestDriverGrantBucketAccessBackendRoutes(t *testing.T) {
 			}
 
 			request := &spec.DriverGrantBucketAccessRequest{
-				AccountName:        tc.accountName,
-				Protocol:           s3Protocol(),
-				AuthenticationType: &spec.AuthenticationType{Type: spec.AuthenticationType_KEY},
-				Buckets: []*spec.DriverGrantBucketAccessRequest_AccessedBucket{{
-					BucketId:             "mock-bucket",
-					ObjectDataAccessMode: accessMode(spec.AccessMode_READ_WRITE),
-				}},
+				Name: tc.accountName, BucketId: "mock-bucket", AuthenticationType: tc.authenticationType,
 			}
 
 			response, err := server.DriverGrantBucketAccess(context.Background(), request)
@@ -609,10 +537,7 @@ func TestDriverRevokeBucketAccess(t *testing.T) {
 
 	server := Server{IAMClient: iam.ClientMock{}, S3Client: s3.ClientMock{}}
 	request := &spec.DriverRevokeBucketAccessRequest{
-		AccountId:          "iam_account",
-		Protocol:           s3Protocol(),
-		AuthenticationType: &spec.AuthenticationType{Type: spec.AuthenticationType_KEY},
-		Buckets:            []*spec.DriverRevokeBucketAccessRequest_AccessedBucket{{BucketId: "mock-bucket"}},
+		AccountId: "iam_account", BucketId: "mock-bucket",
 	}
 
 	response, err := server.DriverRevokeBucketAccess(context.Background(), request)
@@ -648,10 +573,7 @@ func TestDriverRevokeBucketAccessBackendRoutes(t *testing.T) {
 			}
 
 			request := &spec.DriverRevokeBucketAccessRequest{
-				AccountId:          tc.accountID,
-				Protocol:           s3Protocol(),
-				AuthenticationType: &spec.AuthenticationType{Type: spec.AuthenticationType_KEY},
-				Buckets:            []*spec.DriverRevokeBucketAccessRequest_AccessedBucket{{BucketId: tc.bucketID}},
+				AccountId: tc.accountID, BucketId: tc.bucketID,
 			}
 
 			response, err := server.DriverRevokeBucketAccess(context.Background(), request)
@@ -668,22 +590,16 @@ func TestDriverRevokeBucketAccessBackendRoutes(t *testing.T) {
 	}
 }
 
-func TestDriverGrantBucketAccessRejectsMultipleBuckets(t *testing.T) {
+func TestDriverGrantBucketAccessRequiresAdminForKey(t *testing.T) {
 	t.Parallel()
 
 	server := Server{}
 	request := &spec.DriverGrantBucketAccessRequest{
-		AccountName:        "account",
-		Protocol:           s3Protocol(),
-		AuthenticationType: &spec.AuthenticationType{Type: spec.AuthenticationType_KEY},
-		Buckets: []*spec.DriverGrantBucketAccessRequest_AccessedBucket{
-			{BucketId: "one", ObjectDataAccessMode: accessMode(spec.AccessMode_READ_WRITE)},
-			{BucketId: "two", ObjectDataAccessMode: accessMode(spec.AccessMode_READ_WRITE)},
-		},
+		Name: "account", BucketId: "bucket", AuthenticationType: spec.AuthenticationType_Key,
 	}
 
 	_, err := server.DriverGrantBucketAccess(context.Background(), request)
-	require.Equal(t, codes.OutOfRange, status.Code(err))
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
 }
 
 func TestDriverGrantBucketAccessValidation(t *testing.T) {
@@ -691,13 +607,7 @@ func TestDriverGrantBucketAccessValidation(t *testing.T) {
 
 	newRequest := func() *spec.DriverGrantBucketAccessRequest {
 		return &spec.DriverGrantBucketAccessRequest{
-			AccountName:        "account",
-			Protocol:           s3Protocol(),
-			AuthenticationType: &spec.AuthenticationType{Type: spec.AuthenticationType_KEY},
-			Buckets: []*spec.DriverGrantBucketAccessRequest_AccessedBucket{{
-				BucketId:             "bucket",
-				ObjectDataAccessMode: accessMode(spec.AccessMode_READ_WRITE),
-			}},
+			Name: "account", BucketId: "bucket", AuthenticationType: spec.AuthenticationType_IAM,
 		}
 	}
 
@@ -705,17 +615,17 @@ func TestDriverGrantBucketAccessValidation(t *testing.T) {
 		name   string
 		mutate func(*spec.DriverGrantBucketAccessRequest)
 	}{
-		{name: "missing protocol", mutate: func(request *spec.DriverGrantBucketAccessRequest) { request.Protocol = nil }},
-		{name: "unsupported protocol", mutate: func(request *spec.DriverGrantBucketAccessRequest) {
-			request.Protocol = &spec.ObjectProtocol{Type: spec.ObjectProtocol_AZURE}
+		{name: "missing authentication", mutate: func(request *spec.DriverGrantBucketAccessRequest) {
+			request.AuthenticationType = spec.AuthenticationType_UnknownAuthenticationType
 		}},
-		{name: "missing authentication", mutate: func(request *spec.DriverGrantBucketAccessRequest) { request.AuthenticationType = nil }},
-		{name: "service account authentication", mutate: func(request *spec.DriverGrantBucketAccessRequest) {
-			request.AuthenticationType = &spec.AuthenticationType{Type: spec.AuthenticationType_SERVICE_ACCOUNT}
+		{name: "unsupported authentication", mutate: func(request *spec.DriverGrantBucketAccessRequest) {
+			request.AuthenticationType = spec.AuthenticationType(99)
 		}},
-		{name: "missing account name", mutate: func(request *spec.DriverGrantBucketAccessRequest) { request.AccountName = "" }},
-		{name: "missing bucket", mutate: func(request *spec.DriverGrantBucketAccessRequest) { request.Buckets = nil }},
-		{name: "missing bucket ID", mutate: func(request *spec.DriverGrantBucketAccessRequest) { request.Buckets[0].BucketId = "" }},
+		{name: "missing account name", mutate: func(request *spec.DriverGrantBucketAccessRequest) { request.Name = "" }},
+		{name: "missing bucket ID", mutate: func(request *spec.DriverGrantBucketAccessRequest) { request.BucketId = "" }},
+		{name: "invalid access mode", mutate: func(request *spec.DriverGrantBucketAccessRequest) {
+			request.Parameters = map[string]string{"objectDataAccessMode": "invalid"}
+		}},
 	}
 
 	for _, tc := range testCases {
@@ -737,10 +647,7 @@ func TestDriverRevokeBucketAccessValidation(t *testing.T) {
 
 	newRequest := func() *spec.DriverRevokeBucketAccessRequest {
 		return &spec.DriverRevokeBucketAccessRequest{
-			AccountId:          "iam_account",
-			Protocol:           s3Protocol(),
-			AuthenticationType: &spec.AuthenticationType{Type: spec.AuthenticationType_KEY},
-			Buckets:            []*spec.DriverRevokeBucketAccessRequest_AccessedBucket{{BucketId: "bucket"}},
+			AccountId: "iam_account", BucketId: "bucket",
 		}
 	}
 
@@ -748,16 +655,8 @@ func TestDriverRevokeBucketAccessValidation(t *testing.T) {
 		name   string
 		mutate func(*spec.DriverRevokeBucketAccessRequest)
 	}{
-		{name: "missing protocol", mutate: func(request *spec.DriverRevokeBucketAccessRequest) { request.Protocol = nil }},
-		{name: "unsupported protocol", mutate: func(request *spec.DriverRevokeBucketAccessRequest) {
-			request.Protocol = &spec.ObjectProtocol{Type: spec.ObjectProtocol_AZURE}
-		}},
-		{name: "missing authentication", mutate: func(request *spec.DriverRevokeBucketAccessRequest) { request.AuthenticationType = nil }},
-		{name: "unsupported authentication", mutate: func(request *spec.DriverRevokeBucketAccessRequest) {
-			request.AuthenticationType = &spec.AuthenticationType{Type: spec.AuthenticationType_SERVICE_ACCOUNT}
-		}},
-		{name: "missing bucket", mutate: func(request *spec.DriverRevokeBucketAccessRequest) { request.Buckets = nil }},
-		{name: "nil bucket", mutate: func(request *spec.DriverRevokeBucketAccessRequest) { request.Buckets[0] = nil }},
+		{name: "missing account ID", mutate: func(request *spec.DriverRevokeBucketAccessRequest) { request.AccountId = "" }},
+		{name: "missing bucket ID", mutate: func(request *spec.DriverRevokeBucketAccessRequest) { request.BucketId = "" }},
 	}
 
 	for _, tc := range testCases {
@@ -779,95 +678,78 @@ func TestAccessPolicyActions(t *testing.T) {
 
 	testCases := []struct {
 		name             string
-		bucket           *spec.DriverGrantBucketAccessRequest_AccessedBucket
+		parameters       map[string]string
 		wantBucket       []string
 		wantObjects      []string
 		wantInvalidInput bool
 	}{
 		{
-			name: "object data read-only",
-			bucket: &spec.DriverGrantBucketAccessRequest_AccessedBucket{
-				ObjectDataAccessMode: accessMode(spec.AccessMode_READ_ONLY),
-			},
+			name:        "object data read-only",
+			parameters:  map[string]string{"objectDataAccessMode": "ReadOnly"},
 			wantBucket:  []string{"s3:ListBucket"},
 			wantObjects: []string{"s3:GetObject", "s3:GetObjectVersion"},
 		},
 		{
-			name: "object data write-only",
-			bucket: &spec.DriverGrantBucketAccessRequest_AccessedBucket{
-				ObjectDataAccessMode: accessMode(spec.AccessMode_WRITE_ONLY),
-			},
+			name:        "object data write-only",
+			parameters:  map[string]string{"objectDataAccessMode": "WriteOnly"},
 			wantObjects: []string{"s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectVersion"},
 		},
 		{
-			name: "object data read-write",
-			bucket: &spec.DriverGrantBucketAccessRequest_AccessedBucket{
-				ObjectDataAccessMode: accessMode(spec.AccessMode_READ_WRITE),
-			},
+			name:        "object data read-write",
+			parameters:  map[string]string{"objectDataAccessMode": "ReadWrite"},
 			wantBucket:  []string{"s3:ListBucket"},
 			wantObjects: []string{"s3:GetObject", "s3:GetObjectVersion", "s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectVersion"},
 		},
 		{
-			name: "object metadata read-write",
-			bucket: &spec.DriverGrantBucketAccessRequest_AccessedBucket{
-				ObjectMetadataAccessMode: accessMode(spec.AccessMode_READ_WRITE),
-			},
+			name:        "object metadata read-write",
+			parameters:  map[string]string{"objectMetadataAccessMode": "ReadWrite"},
 			wantObjects: []string{"s3:GetObjectTagging", "s3:GetObjectVersionTagging", "s3:PutObjectTagging", "s3:PutObjectVersionTagging", "s3:DeleteObjectTagging", "s3:DeleteObjectVersionTagging"},
 		},
 		{
-			name: "object metadata read-only",
-			bucket: &spec.DriverGrantBucketAccessRequest_AccessedBucket{
-				ObjectMetadataAccessMode: accessMode(spec.AccessMode_READ_ONLY),
-			},
+			name:        "object metadata read-only",
+			parameters:  map[string]string{"objectMetadataAccessMode": "ReadOnly"},
 			wantObjects: []string{"s3:GetObjectTagging", "s3:GetObjectVersionTagging"},
 		},
 		{
-			name: "object metadata write-only",
-			bucket: &spec.DriverGrantBucketAccessRequest_AccessedBucket{
-				ObjectMetadataAccessMode: accessMode(spec.AccessMode_WRITE_ONLY),
-			},
+			name:        "object metadata write-only",
+			parameters:  map[string]string{"objectMetadataAccessMode": "WriteOnly"},
 			wantObjects: []string{"s3:PutObjectTagging", "s3:PutObjectVersionTagging", "s3:DeleteObjectTagging", "s3:DeleteObjectVersionTagging"},
 		},
 		{
-			name: "bucket metadata read-write",
-			bucket: &spec.DriverGrantBucketAccessRequest_AccessedBucket{
-				BucketMetadataAccessMode: accessMode(spec.AccessMode_READ_WRITE),
-			},
+			name:       "bucket metadata read-write",
+			parameters: map[string]string{"bucketMetadataAccessMode": "ReadWrite"},
 			wantBucket: []string{"s3:GetBucketTagging", "s3:PutBucketTagging", "s3:DeleteBucketTagging"},
 		},
 		{
-			name: "bucket metadata read-only",
-			bucket: &spec.DriverGrantBucketAccessRequest_AccessedBucket{
-				BucketMetadataAccessMode: accessMode(spec.AccessMode_READ_ONLY),
-			},
+			name:       "bucket metadata read-only",
+			parameters: map[string]string{"bucketMetadataAccessMode": "ReadOnly"},
 			wantBucket: []string{"s3:GetBucketTagging"},
 		},
 		{
-			name: "bucket metadata write-only",
-			bucket: &spec.DriverGrantBucketAccessRequest_AccessedBucket{
-				BucketMetadataAccessMode: accessMode(spec.AccessMode_WRITE_ONLY),
-			},
+			name:       "bucket metadata write-only",
+			parameters: map[string]string{"bucketMetadataAccessMode": "WriteOnly"},
 			wantBucket: []string{"s3:PutBucketTagging", "s3:DeleteBucketTagging"},
 		},
 		{
-			name: "any grants no extra permissions",
-			bucket: &spec.DriverGrantBucketAccessRequest_AccessedBucket{
-				ObjectDataAccessMode:     accessMode(spec.AccessMode_READ_ONLY),
-				ObjectMetadataAccessMode: accessMode(spec.AccessMode_ANY),
-				BucketMetadataAccessMode: accessMode(spec.AccessMode_ANY),
-			},
+			name:        "any grants no extra permissions",
+			parameters:  map[string]string{"objectDataAccessMode": "ReadOnly", "objectMetadataAccessMode": "Any", "bucketMetadataAccessMode": "Any"},
 			wantBucket:  []string{"s3:ListBucket"},
 			wantObjects: []string{"s3:GetObject", "s3:GetObjectVersion"},
 		},
 		{
 			name:             "no permissions",
-			bucket:           &spec.DriverGrantBucketAccessRequest_AccessedBucket{ObjectDataAccessMode: accessMode(spec.AccessMode_ANY)},
+			parameters:       map[string]string{"objectDataAccessMode": "Any"},
 			wantInvalidInput: true,
 		},
 		{
 			name:             "unknown mode",
-			bucket:           &spec.DriverGrantBucketAccessRequest_AccessedBucket{ObjectDataAccessMode: accessMode(spec.AccessMode_UNKNOWN)},
+			parameters:       map[string]string{"objectDataAccessMode": "Unknown"},
 			wantInvalidInput: true,
+		},
+		{
+			name:        "backwards compatible default",
+			wantBucket:  []string{"s3:ListBucket"},
+			wantObjects: []string{"s3:GetObject", "s3:GetObjectVersion", "s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectVersion"},
 		},
 	}
 
@@ -875,7 +757,7 @@ func TestAccessPolicyActions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			bucketActions, objectActions, err := accessPolicyActions(tc.bucket)
+			bucketActions, objectActions, err := accessPolicyActions(tc.parameters)
 			if tc.wantInvalidInput {
 				require.Equal(t, codes.InvalidArgument, status.Code(err))
 

@@ -43,27 +43,10 @@ type Server struct {
 	Config      config.Config
 }
 
-//nolint:revive // RPC method name is defined by the COSI protobuf API.
-func (s *Server) DriverGenerateBucketId(_ context.Context, request *spec.DriverGenerateBucketIdRequest) (*spec.DriverGenerateBucketIdResponse, error) {
-	if err := validateProtocols(request.GetProtocols()); err != nil {
-		return nil, err
-	}
-
-	if request.GetName() == "" {
-		return nil, grpcError(codes.InvalidArgument, "bucket name is required")
-	}
-
-	return &spec.DriverGenerateBucketIdResponse{BucketId: request.GetName()}, nil
-}
-
 func (s *Server) DriverCreateBucket(ctx context.Context, request *spec.DriverCreateBucketRequest) (*spec.DriverCreateBucketResponse, error) {
-	if err := validateProtocols(request.GetProtocols()); err != nil {
-		return nil, err
-	}
-
-	bucketID := request.GetBucketId()
+	bucketID := request.GetName()
 	if bucketID == "" {
-		return nil, grpcError(codes.InvalidArgument, "bucket ID is required")
+		return nil, grpcError(codes.InvalidArgument, "bucket name is required")
 	}
 
 	configuration, err := bucket.ParseConfiguration(request.GetParameters())
@@ -83,30 +66,11 @@ func (s *Server) DriverCreateBucket(ctx context.Context, request *spec.DriverCre
 	}
 
 	return &spec.DriverCreateBucketResponse{
-		Protocols: s3BucketInfo(bucketID, s.Config),
+		BucketId: bucketID,
+		BucketInfo: &spec.Protocol{Type: &spec.Protocol_S3{S3: &spec.S3{
+			Region: s.Config.Region,
+		}}},
 	}, nil
-}
-
-func (s *Server) DriverGetBucket(ctx context.Context, request *spec.DriverGetBucketRequest) (*spec.DriverGetBucketResponse, error) {
-	if err := validateProtocols(request.GetProtocols()); err != nil {
-		return nil, err
-	}
-
-	bucketID := request.GetBucketId()
-	if bucketID == "" {
-		return nil, grpcError(codes.InvalidArgument, "bucket ID is required")
-	}
-
-	if err := bucket.CheckBucket(ctx, s.S3Client, bucketID); err != nil {
-		var apiErr smithy.APIError
-		if errors.As(err, &apiErr) && (apiErr.ErrorCode() == "NoSuchBucket" || apiErr.ErrorCode() == "NotFound") {
-			return nil, grpcErrorf(codes.NotFound, "bucket %s does not exist", bucketID)
-		}
-
-		return nil, fmt.Errorf("failed to get bucket: %w", err)
-	}
-
-	return &spec.DriverGetBucketResponse{Protocols: s3BucketInfo(bucketID, s.Config)}, nil
 }
 
 func (s *Server) DriverDeleteBucket(ctx context.Context, request *spec.DriverDeleteBucketRequest) (*spec.DriverDeleteBucketResponse, error) {
@@ -124,24 +88,26 @@ func (s *Server) DriverDeleteBucket(ctx context.Context, request *spec.DriverDel
 }
 
 func (s *Server) DriverGrantBucketAccess(ctx context.Context, request *spec.DriverGrantBucketAccessRequest) (*spec.DriverGrantBucketAccessResponse, error) {
-	bucketRequest, bucketActions, objectActions, err := prepareGrantRequest(request)
+	bucketActions, objectActions, err := prepareGrantRequest(request)
 	if err != nil {
 		return nil, err
 	}
 
-	accountID, accessKey, secretKey, err := s.grantAccess(ctx, request.GetAccountName(), bucketRequest.GetBucketId(), bucketActions, objectActions)
+	accountID, accessKey, secretKey, err := s.grantAccess(ctx, request, bucketActions, objectActions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to grant bucket access: %w", err)
 	}
 
 	return &spec.DriverGrantBucketAccessResponse{
 		AccountId: accountID,
-		Buckets: []*spec.DriverGrantBucketAccessResponse_BucketInfo{{
-			BucketId:   bucketRequest.GetBucketId(),
-			BucketInfo: s3BucketInfo(bucketRequest.GetBucketId(), s.Config),
-		}},
-		Credentials: &spec.CredentialInfo{
-			S3: &spec.S3CredentialInfo{AccessKeyId: accessKey, AccessSecretKey: secretKey},
+		Credentials: map[string]*spec.CredentialDetails{
+			"s3": {Secrets: map[string]string{
+				"authenticationType": request.GetAuthenticationType().String(),
+				"endpoint":           s.Config.Endpoints.S3,
+				"region":             s.Config.Region,
+				"accessKeyID":        accessKey,
+				"accessSecretKey":    secretKey,
+			}},
 		},
 	}, nil
 }
@@ -158,9 +124,15 @@ func (s *Server) DriverRevokeBucketAccess(ctx context.Context, request *spec.Dri
 	return &spec.DriverRevokeBucketAccessResponse{}, nil
 }
 
-func (s *Server) grantAccess(ctx context.Context, accountName, bucketID string, bucketActions, objectActions []string) (accountID, accessKey, secretKey string, err error) {
+func (s *Server) grantAccess(ctx context.Context, request *spec.DriverGrantBucketAccessRequest, bucketActions, objectActions []string) (accountID, accessKey, secretKey string, err error) {
+	accountName, bucketID := request.GetName(), request.GetBucketId()
 	accountID = "iam_" + accountName
-	if s.AdminClient != nil {
+
+	if request.GetAuthenticationType() == spec.AuthenticationType_Key {
+		if s.AdminClient == nil {
+			return "", "", "", grpcError(codes.FailedPrecondition, "admin client is not configured for Key authentication")
+		}
+
 		accountID = "key_" + accountName
 
 		klog.Infof("Granting S3 key access to bucket %s", bucketID)
@@ -192,7 +164,7 @@ func (s *Server) revokeAccess(ctx context.Context, request *spec.DriverRevokeBuc
 
 		return nil
 	case strings.HasPrefix(request.GetAccountId(), "key_") && s.AdminClient != nil:
-		if err := key.RevokeBucketAccess(ctx, s.AdminClient, s.S3Client, request.GetAccountId(), s.Config.Credentials.Group, request.GetBuckets()[0].GetBucketId()); err != nil {
+		if err := key.RevokeBucketAccess(ctx, s.AdminClient, s.S3Client, request.GetAccountId(), s.Config.Credentials.Group, request.GetBucketId()); err != nil {
 			return fmt.Errorf("failed to revoke HyperStore key access: %w", err)
 		}
 
@@ -202,90 +174,56 @@ func (s *Server) revokeAccess(ctx context.Context, request *spec.DriverRevokeBuc
 	}
 }
 
-func prepareGrantRequest(request *spec.DriverGrantBucketAccessRequest) (*spec.DriverGrantBucketAccessRequest_AccessedBucket, []string, []string, error) {
-	if request.GetProtocol() == nil || request.GetProtocol().GetType() != spec.ObjectProtocol_S3 {
-		return nil, nil, nil, grpcError(codes.InvalidArgument, "only the S3 protocol is supported")
+func prepareGrantRequest(request *spec.DriverGrantBucketAccessRequest) ([]string, []string, error) {
+	if request.GetAuthenticationType() != spec.AuthenticationType_IAM && request.GetAuthenticationType() != spec.AuthenticationType_Key {
+		return nil, nil, grpcError(codes.InvalidArgument, "authentication type must be IAM or Key")
 	}
 
-	if request.GetAuthenticationType() == nil || request.GetAuthenticationType().GetType() != spec.AuthenticationType_KEY {
-		return nil, nil, nil, grpcError(codes.InvalidArgument, "only key-based authentication is supported")
+	if request.GetName() == "" {
+		return nil, nil, grpcError(codes.InvalidArgument, "account name is required")
 	}
 
-	if request.GetAccountName() == "" {
-		return nil, nil, nil, grpcError(codes.InvalidArgument, "account name is required")
+	if request.GetBucketId() == "" {
+		return nil, nil, grpcError(codes.InvalidArgument, "bucket ID is required")
 	}
 
-	if len(request.GetBuckets()) == 0 {
-		return nil, nil, nil, grpcError(codes.InvalidArgument, "at least one bucket is required")
-	}
-
-	if len(request.GetBuckets()) > 1 {
-		return nil, nil, nil, grpcError(codes.OutOfRange, "multi-bucket access is not supported")
-	}
-
-	bucketRequest := request.GetBuckets()[0]
-	if bucketRequest == nil || bucketRequest.GetBucketId() == "" {
-		return nil, nil, nil, grpcError(codes.InvalidArgument, "bucket ID is required")
-	}
-
-	bucketActions, objectActions, err := accessPolicyActions(bucketRequest)
-
-	return bucketRequest, bucketActions, objectActions, err
+	return accessPolicyActions(request.GetParameters())
 }
 
 func validateRevokeRequest(request *spec.DriverRevokeBucketAccessRequest) error {
-	if request.GetProtocol() == nil || request.GetProtocol().GetType() != spec.ObjectProtocol_S3 {
-		return grpcError(codes.InvalidArgument, "only the S3 protocol is supported")
+	if request.GetAccountId() == "" {
+		return grpcError(codes.InvalidArgument, "account ID is required")
 	}
 
-	if request.GetAuthenticationType() == nil || request.GetAuthenticationType().GetType() != spec.AuthenticationType_KEY {
-		return grpcError(codes.InvalidArgument, "only key-based authentication is supported")
-	}
-
-	if len(request.GetBuckets()) != 1 || request.GetBuckets()[0] == nil {
-		return grpcError(codes.InvalidArgument, "exactly one bucket is required")
+	if request.GetBucketId() == "" {
+		return grpcError(codes.InvalidArgument, "bucket ID is required")
 	}
 
 	return nil
 }
 
-func validateProtocols(protocols []*spec.ObjectProtocol) error {
-	for _, protocol := range protocols {
-		if protocol == nil || protocol.GetType() != spec.ObjectProtocol_S3 {
-			return grpcError(codes.InvalidArgument, "only the S3 protocol is supported")
-		}
+func accessPolicyActions(parameters map[string]string) (bucketActions, objectActions []string, err error) {
+	dataMode, hasData := parameters["objectDataAccessMode"]
+	metadataMode, hasMetadata := parameters["objectMetadataAccessMode"]
+	bucketMode, hasBucket := parameters["bucketMetadataAccessMode"]
+
+	if !hasData && !hasMetadata && !hasBucket {
+		dataMode = "ReadWrite"
 	}
 
-	return nil
-}
-
-func s3BucketInfo(bucketID string, config config.Config) *spec.ObjectProtocolAndBucketInfo {
-	return &spec.ObjectProtocolAndBucketInfo{
-		S3: &spec.S3BucketInfo{
-			BucketId: bucketID,
-			Endpoint: config.Endpoints.S3,
-			Region:   config.Region,
-			AddressingStyle: &spec.S3AddressingStyle{
-				Style: spec.S3AddressingStyle_PATH,
-			},
-		},
-	}
-}
-
-func accessPolicyActions(bucketRequest *spec.DriverGrantBucketAccessRequest_AccessedBucket) (bucketActions, objectActions []string, err error) {
-	if err := appendAccessModeActions(bucketRequest.GetObjectDataAccessMode(), &bucketActions, &objectActions,
+	if err := appendAccessModeActions(dataMode, &bucketActions, &objectActions,
 		[]string{"s3:ListBucket"}, nil,
 		[]string{"s3:GetObject", "s3:GetObjectVersion"}, []string{"s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectVersion"}); err != nil {
 		return nil, nil, err
 	}
 
-	if err := appendAccessModeActions(bucketRequest.GetObjectMetadataAccessMode(), &bucketActions, &objectActions,
+	if err := appendAccessModeActions(metadataMode, &bucketActions, &objectActions,
 		nil, nil,
 		[]string{"s3:GetObjectTagging", "s3:GetObjectVersionTagging"}, []string{"s3:PutObjectTagging", "s3:PutObjectVersionTagging", "s3:DeleteObjectTagging", "s3:DeleteObjectVersionTagging"}); err != nil {
 		return nil, nil, err
 	}
 
-	if err := appendAccessModeActions(bucketRequest.GetBucketMetadataAccessMode(), &bucketActions, &objectActions,
+	if err := appendAccessModeActions(bucketMode, &bucketActions, &objectActions,
 		[]string{"s3:GetBucketTagging"}, []string{"s3:PutBucketTagging", "s3:DeleteBucketTagging"}, nil, nil); err != nil {
 		return nil, nil, err
 	}
@@ -297,7 +235,7 @@ func accessPolicyActions(bucketRequest *spec.DriverGrantBucketAccessRequest_Acce
 	return bucketActions, objectActions, nil
 }
 
-func appendAccessModeActions(mode *spec.AccessMode, bucketActions, objectActions *[]string, bucketReadActions, bucketWriteActions, objectReadActions, objectWriteActions []string) error {
+func appendAccessModeActions(mode string, bucketActions, objectActions *[]string, bucketReadActions, bucketWriteActions, objectReadActions, objectWriteActions []string) error {
 	read, write, err := modePermissions(mode)
 	if err != nil {
 		return err
@@ -316,22 +254,16 @@ func appendAccessModeActions(mode *spec.AccessMode, bucketActions, objectActions
 	return nil
 }
 
-func modePermissions(mode *spec.AccessMode) (read, write bool, err error) {
-	if mode == nil {
+func modePermissions(mode string) (read, write bool, err error) {
+	switch mode {
+	case "", "Any":
 		return false, false, nil
-	}
-
-	switch mode.GetMode() {
-	case spec.AccessMode_ANY:
-		return false, false, nil
-	case spec.AccessMode_READ_ONLY:
+	case "ReadOnly":
 		return true, false, nil
-	case spec.AccessMode_WRITE_ONLY:
+	case "WriteOnly":
 		return false, true, nil
-	case spec.AccessMode_READ_WRITE:
+	case "ReadWrite":
 		return true, true, nil
-	case spec.AccessMode_UNKNOWN:
-		return false, false, grpcError(codes.InvalidArgument, "unknown access mode")
 	default:
 		return false, false, grpcError(codes.InvalidArgument, "unsupported access mode")
 	}

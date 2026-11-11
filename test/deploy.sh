@@ -15,6 +15,5 @@ pushd ..
     k3d image import -c cosi-driver quay.io/cloudian/cosi-driver:v0.0.0
 popd
 
-# 3rd Party Resources - Lock to a SHA? Given releases are thin on the ground
-kubectl apply -k github.com/kubernetes-sigs/container-object-storage-interface-api
-kubectl apply -k github.com/kubernetes-sigs/container-object-storage-interface-controller
+# Install the v1alpha1 APIs and controller matching the driver's proto release.
+kubectl apply -k 'https://github.com/kubernetes-sigs/container-object-storage-interface//?ref=v0.2.2'

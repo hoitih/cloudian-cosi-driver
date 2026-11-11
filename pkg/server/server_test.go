@@ -6,11 +6,36 @@ import (
 	"os"
 	"testing"
 
+	"github.com/cloudian/cloudian-cosi-driver/pkg/identity"
+	"github.com/cloudian/cloudian-cosi-driver/pkg/provisioner"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	klog "k8s.io/klog/v2"
 	spec "sigs.k8s.io/container-object-storage-interface/proto"
 )
+
+func TestServerRegistersV1alpha1Services(t *testing.T) {
+	t.Parallel()
+
+	server := newGRPCServer()
+	t.Cleanup(server.Stop)
+	spec.RegisterIdentityServer(server, &identity.Server{})
+	spec.RegisterProvisionerServer(server, &provisioner.Server{})
+
+	services := server.GetServiceInfo()
+	require.Len(t, services, 2)
+	require.Contains(t, services, "cosi.v1alpha1.Identity")
+	require.Contains(t, services, "cosi.v1alpha1.Provisioner")
+
+	methods := make([]string, 0, len(services["cosi.v1alpha1.Provisioner"].Methods))
+	for _, method := range services["cosi.v1alpha1.Provisioner"].Methods {
+		methods = append(methods, method.Name)
+	}
+
+	require.ElementsMatch(t, []string{
+		"DriverCreateBucket", "DriverDeleteBucket", "DriverGrantBucketAccess", "DriverRevokeBucketAccess",
+	}, methods)
+}
 
 //nolint:paralleltest // This test changes process-global klog output.
 func TestLoggingInterceptorRedactsGrantCredentials(t *testing.T) {
@@ -25,8 +50,8 @@ func TestLoggingInterceptorRedactsGrantCredentials(t *testing.T) {
 
 	secret := "test-secret-that-must-not-be-logged"
 	response := &spec.DriverGrantBucketAccessResponse{
-		Credentials: &spec.CredentialInfo{
-			S3: &spec.S3CredentialInfo{AccessSecretKey: secret},
+		Credentials: map[string]*spec.CredentialDetails{
+			"s3": {Secrets: map[string]string{"accessSecretKey": secret}},
 		},
 	}
 	interceptor := loggingInterceptor()
@@ -34,7 +59,7 @@ func TestLoggingInterceptorRedactsGrantCredentials(t *testing.T) {
 	actualResponse, err := interceptor(
 		context.Background(),
 		&spec.DriverGrantBucketAccessRequest{},
-		&grpc.UnaryServerInfo{FullMethod: "/cosi.Provisioner/DriverGrantBucketAccess"},
+		&grpc.UnaryServerInfo{FullMethod: "/cosi.v1alpha1.Provisioner/DriverGrantBucketAccess"},
 		func(context.Context, interface{}) (interface{}, error) {
 			return response, nil
 		},

@@ -1,6 +1,6 @@
 apiVersion: v2
 name: cosi-driver
-description: Cloudian COSI v1alpha2 driver and compatible sidecar
+description: Cloudian COSI v1alpha1 driver with retention, lifecycle, and retry-safe cleanup
 type: application
-version: 0.1.0
+version: 0.1.0-alpha1.1
 appVersion: "v0.0.0"
