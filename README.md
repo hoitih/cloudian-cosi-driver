@@ -37,6 +37,8 @@ To build the code and an up to date image:
 make image
 ```
 
+Pushes to `feat/v1alpha1_improvements` build and publish `ghcr.io/hoitih/cloudian-cosi-driver`, tagged with both the short commit ID and `feat-v1alpha1-improvements`. The workflow authenticates with `GITHUB_TOKEN` and requires no additional registry secrets.
+
 ### Testing
 
 To build a dev version of the image, then bring up a k3d test environment and load this image see `test/deploy.sh`.

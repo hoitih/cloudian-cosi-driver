@@ -217,6 +217,7 @@ func assertHelmDeployment(t *testing.T, namespace string, manifest helmManifest)
 	driver, sidecar := pod.Containers[0], pod.Containers[1]
 	require.Equal(t, []string{"/bin/sh", "-c"}, driver.Command)
 	require.Equal(t, []string{"umask 0007; exec /entrypoint.sh"}, driver.Args)
+	require.Equal(t, "ghcr.io/hoitih/cloudian-cosi-driver:feat-v1alpha1-improvements", driver.Image)
 
 	for _, env := range driver.Env {
 		require.NotEqual(t, "ADMIN_ENDPOINT", env.Name)

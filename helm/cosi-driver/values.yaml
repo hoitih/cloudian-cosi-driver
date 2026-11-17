@@ -16,9 +16,9 @@ disableTLSCertificateCheck: false
 existingS3CertificateSecret: ""
 existingCredentialsSecret: ""
 image:
-  repository: quay.io/cloudian/cosi-driver
-  # Overrides the image tag whose default is the chart appVersion.
-  tag: ""
+  repository: ghcr.io/hoitih/cloudian-cosi-driver
+  # Overrides the branch image tag; each build is also published by short commit ID.
+  tag: feat-v1alpha1-improvements
   imagePullPolicy: IfNotPresent
 sidecar:
   # Supply a v1alpha1 sidecar image built from the COSI v0.2.2 release.

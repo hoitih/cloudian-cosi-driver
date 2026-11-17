@@ -11,8 +11,8 @@ k3d cluster create --config ../utils/k3d/k3d-config.yaml
 # Copy an up-to-date image to the cluster
 pushd ..
     make image
-    docker tag cloudian-cosi-driver:v0.0.0 quay.io/cloudian/cosi-driver:v0.0.0
-    k3d image import -c cosi-driver quay.io/cloudian/cosi-driver:v0.0.0
+    docker tag cloudian-cosi-driver:v0.0.0 ghcr.io/hoitih/cloudian-cosi-driver:feat-v1alpha1-improvements
+    k3d image import -c cosi-driver ghcr.io/hoitih/cloudian-cosi-driver:feat-v1alpha1-improvements
 popd
 
 # Install the v1alpha1 APIs and controller matching the driver's proto release.
