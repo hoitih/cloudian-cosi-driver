@@ -277,6 +277,8 @@ Choose `IAM` for IAM users and S3 access keys, or `Key` for HyperStore users (re
 
 Optional driver-specific access parameters are `objectDataAccessMode`, `objectMetadataAccessMode`, and `bucketMetadataAccessMode`. Each accepts `ReadOnly`, `WriteOnly`, `ReadWrite`, or `Any`. If all three are absent, object data receives the original read/write policy. Once any is provided, an omitted category receives no permissions, and `Any` also grants no permissions for that category. At least one category must grant permissions. These are top-level `BucketAccessClass.parameters`, not native v1alpha2 `accessModes` fields on a BucketAccess.
 
+For `bucketMetadataAccessMode`, write access uses `s3:PutBucketTagging`, which authorizes both setting and deleting bucket tags. There is no separate `s3:DeleteBucketTagging` IAM action.
+
 Apply the BucketAccessClass Resource:
 ```
 kubectl apply -f bucketaccessclass.yaml

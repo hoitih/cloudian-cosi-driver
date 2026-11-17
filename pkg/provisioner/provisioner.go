@@ -224,7 +224,7 @@ func accessPolicyActions(parameters map[string]string) (bucketActions, objectAct
 	}
 
 	if err := appendAccessModeActions(bucketMode, &bucketActions, &objectActions,
-		[]string{"s3:GetBucketTagging"}, []string{"s3:PutBucketTagging", "s3:DeleteBucketTagging"}, nil, nil); err != nil {
+		[]string{"s3:GetBucketTagging"}, []string{"s3:PutBucketTagging"}, nil, nil); err != nil {
 		return nil, nil, err
 	}
 

@@ -718,7 +718,7 @@ func TestAccessPolicyActions(t *testing.T) {
 		{
 			name:       "bucket metadata read-write",
 			parameters: map[string]string{"bucketMetadataAccessMode": "ReadWrite"},
-			wantBucket: []string{"s3:GetBucketTagging", "s3:PutBucketTagging", "s3:DeleteBucketTagging"},
+			wantBucket: []string{"s3:GetBucketTagging", "s3:PutBucketTagging"},
 		},
 		{
 			name:       "bucket metadata read-only",
@@ -728,7 +728,7 @@ func TestAccessPolicyActions(t *testing.T) {
 		{
 			name:       "bucket metadata write-only",
 			parameters: map[string]string{"bucketMetadataAccessMode": "WriteOnly"},
-			wantBucket: []string{"s3:PutBucketTagging", "s3:DeleteBucketTagging"},
+			wantBucket: []string{"s3:PutBucketTagging"},
 		},
 		{
 			name:        "any grants no extra permissions",
